@@ -8,8 +8,8 @@ from app import celery_app
 logger = logging.getLogger(__name__)
 
 APIS_DEFAULT = [
-    {"name": "DIAN API", "url": "http://18.234.78.132:8000/"},
-    {"name": "ESuite Account", "url": "http://54.175.22.139:8001"},
+    {"name": "DIAN API", "url": "http://18.234.78.132:8000"},
+    {"name": "Account API", "url": "http://54.175.22.139:8001"},
 ]
 
 

@@ -9,7 +9,7 @@ from app import celery_app
 logger = logging.getLogger(__name__)
 
 
-def _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin, timeout=900):
+def _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin, timeout=900, destinatarios=None):
     """Lógica compartida para ejecutar el script de Dominus y parsear resultados."""
     from tasks.correo import enviar_correo
 
@@ -75,6 +75,7 @@ def _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin,
     enviar_correo.delay(
         asunto=f"Sincronización Dominus - Customer {customer_id}",
         mensaje=resumen_texto,
+        destinatarios=destinatarios,
         datos_reporte={
             "customer_id": customer_id,
             "branch_id": branch_id,
@@ -88,7 +89,7 @@ def _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin,
 
 
 @celery_app.task(name="tasks.dominus.sincronizar_dominus")
-def sincronizar_dominus(customer_id=26, branch_id=1054, procesos=None):
+def sincronizar_dominus(customer_id=26, branch_id=1054, procesos=None, destinatarios=None):
     """Ejecuta la sincronización de datos desde Dominus para el día anterior."""
     if procesos is None:
         procesos = ["invoices", "consolidated"]
@@ -96,11 +97,11 @@ def sincronizar_dominus(customer_id=26, branch_id=1054, procesos=None):
     ayer = date.today() - timedelta(days=1)
     fecha = ayer.strftime("%Y-%m-%d")
 
-    return _ejecutar_dominus(customer_id, branch_id, procesos, fecha, fecha, timeout=900)
+    return _ejecutar_dominus(customer_id, branch_id, procesos, fecha, fecha, timeout=900, destinatarios=destinatarios)
 
 
 @celery_app.task(name="tasks.dominus.sincronizar_dominus_mensual")
-def sincronizar_dominus_mensual(customer_id=26, branch_id=1054, procesos=None):
+def sincronizar_dominus_mensual(customer_id=26, branch_id=1054, procesos=None, destinatarios=None):
     """Ejecuta la sincronización completa del mes anterior (1ro de cada mes a las 2AM)."""
     if procesos is None:
         procesos = ["invoices", "consolidated"]
@@ -115,4 +116,4 @@ def sincronizar_dominus_mensual(customer_id=26, branch_id=1054, procesos=None):
     fecha_fin = ultimo_dia_mes_anterior.strftime("%Y-%m-%d")
 
     # Timeout más alto para sincronización mensual completa (2 horas)
-    return _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin, timeout=7200)
+    return _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin, timeout=7200, destinatarios=destinatarios)
