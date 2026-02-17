@@ -16,13 +16,9 @@ def sincronizar_siigo(customer_id=23, procesos=None):
     if procesos is None:
         procesos = ["invoices", "customers", "products"]
 
-    script_path = os.environ.get("EREPORTS_SIIGO_SCRIPT_PATH", "")
-    if not script_path:
-        logger.error("EREPORTS_SIIGO_SCRIPT_PATH no está configurado.")
-        return "Error: EREPORTS_SIIGO_SCRIPT_PATH no configurado"
-
-    script_file = os.path.join(script_path, "script.py")
-    venv_python = os.path.join(script_path, ".venv", "bin", "python3")
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script_file = os.path.join(project_dir, "scripts", "siigo_script.py")
+    venv_python = os.path.join(project_dir, ".venv", "bin", "python3")
     python_bin = venv_python if os.path.isfile(venv_python) else "python3"
 
     hoy = date.today()
@@ -46,7 +42,7 @@ def sincronizar_siigo(customer_id=23, procesos=None):
             comando,
             capture_output=True,
             text=True,
-            cwd=script_path,
+            cwd=os.path.dirname(script_file),
             timeout=600,
         )
 

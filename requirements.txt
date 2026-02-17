@@ -1,3 +1,6 @@
 celery[redis]
 pyyaml
 python-dotenv
+psycopg2-binary
+requests
+rich
