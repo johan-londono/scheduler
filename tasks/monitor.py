@@ -1,4 +1,3 @@
-import os
 import logging
 from datetime import datetime
 
@@ -8,8 +7,13 @@ from app import celery_app
 
 logger = logging.getLogger(__name__)
 
+APIS_DEFAULT = [
+    {"name": "DIAN API", "url": "http://18.234.78.132:8000/"},
+    {"name": "ESuite Account", "url": "http://54.175.22.139:8001"},
+]
 
-def _verificar_endpoint(nombre, url, timeout=10):
+
+def _verificar_endpoint(nombre, url, timeout=15):
     """Realiza un GET a la URL y retorna el estado."""
     try:
         resp = requests.get(url, timeout=timeout)
@@ -19,7 +23,7 @@ def _verificar_endpoint(nombre, url, timeout=10):
             "detalle": f"HTTP {resp.status_code} en {resp.elapsed.total_seconds():.2f}s",
         }
     except requests.ConnectionError:
-        return {"proceso": nombre, "estado": "ERROR", "detalle": "Sin conexión"}
+        return {"proceso": nombre, "estado": "ERROR", "detalle": "Sin conexion"}
     except requests.Timeout:
         return {"proceso": nombre, "estado": "ERROR", "detalle": f"Timeout (>{timeout}s)"}
     except Exception as e:
@@ -27,19 +31,17 @@ def _verificar_endpoint(nombre, url, timeout=10):
 
 
 @celery_app.task(name="tasks.monitor.verificar_apis")
-def verificar_apis():
-    """Verifica el estado de las APIs de Siigo y Dominus y envía correo con el resultado."""
+def verificar_apis(apis=None, destinatario="johan.londono@eholding.com.co"):
+    """Verifica el estado de multiples APIs y envia correo con el resultado."""
     from tasks.correo import enviar_correo
 
+    if apis is None:
+        apis = APIS_DEFAULT
+
     ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    logger.info(f"[{ahora}] Verificando estado de {len(apis)} APIs...")
 
-    dominus_api_url = os.environ.get("DOMINUS_API_URL", "http://54.175.22.139:8001")
-
-    logger.info(f"[{ahora}] Verificando estado de APIs...")
-
-    resultados = [
-        _verificar_endpoint("API Dominus", dominus_api_url),
-    ]
+    resultados = [_verificar_endpoint(api["name"], api["url"]) for api in apis]
 
     todas_ok = all(r["estado"] == "OK" for r in resultados)
     estado = "OK" if todas_ok else "ERROR"
@@ -53,8 +55,9 @@ def verificar_apis():
     enviar_correo.delay(
         asunto=f"Monitor APIs - {estado}",
         mensaje=resumen,
+        destinatarios=[destinatario],
         datos_reporte={
-            "customer_id": "N/A",
+            "customer_id": "Health Check",
             "fecha_inicio": ahora,
             "fecha_fin": ahora,
             "resultados": resultados,
