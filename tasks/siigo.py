@@ -52,17 +52,26 @@ def sincronizar_siigo(customer_id=23, procesos=None):
 
         if resultado.returncode == 0:
             logger.info(f"Sincronización {proceso} completada exitosamente.")
-            resultados.append(f"{proceso}: OK")
+            resultados.append({"proceso": proceso, "estado": "OK", "detalle": ""})
         else:
-            logger.error(f"Error en sincronización {proceso}: {resultado.stderr}")
-            resultados.append(f"{proceso}: ERROR - {resultado.stderr[:200]}")
+            error_msg = resultado.stderr[:200]
+            logger.error(f"Error en sincronización {proceso}: {error_msg}")
+            resultados.append({"proceso": proceso, "estado": "ERROR", "detalle": error_msg})
 
-    resumen = f"Sincronización Siigo customer={customer_id} [{fecha_inicio} a {fecha_fin}]:\n" + "\n".join(f"  - {r}" for r in resultados)
-    logger.info(resumen)
+    resumen_texto = f"Sincronización Siigo customer={customer_id} [{fecha_inicio} a {fecha_fin}]:\n" + "\n".join(
+        f"  - {r['proceso']}: {r['estado']}" for r in resultados
+    )
+    logger.info(resumen_texto)
 
     enviar_correo.delay(
         asunto=f"Sincronización Siigo - Customer {customer_id}",
-        mensaje=resumen,
+        mensaje=resumen_texto,
+        datos_reporte={
+            "customer_id": customer_id,
+            "fecha_inicio": fecha_inicio,
+            "fecha_fin": fecha_fin,
+            "resultados": resultados,
+        },
     )
 
-    return resumen
+    return resumen_texto
