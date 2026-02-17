@@ -82,3 +82,4 @@ import tasks.mantenimiento  # noqa: F401, E402
 import tasks.siigo  # noqa: F401, E402
 import tasks.correo  # noqa: F401, E402
 import tasks.dominus  # noqa: F401, E402
+import tasks.monitor  # noqa: F401, E402
