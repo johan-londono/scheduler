@@ -14,7 +14,7 @@ def sincronizar_siigo(customer_id=23, procesos=None, destinatarios=None):
     from tasks.correo import enviar_correo
 
     if procesos is None:
-        procesos = ["invoices", "customers", "products"]
+        procesos = ["invoices", "customers", "products", "users", "credit-notes"]
 
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     script_file = os.path.join(project_dir, "scripts", "siigo_script.py")

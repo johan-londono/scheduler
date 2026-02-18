@@ -151,7 +151,11 @@ sudo systemctl status celery-worker celery-beat
 sudo journalctl -u celery-worker -f
 sudo journalctl -u celery-beat -f
 
+# Recargar configuracion de systemd (necesario si se modificaron los .service)
+sudo systemctl daemon-reload
+
 # Reiniciar (necesario despues de cambios en YAML, .env o codigo)
+sudo systemctl daemon-reload
 sudo systemctl restart celery-worker celery-beat
 
 # Detener
