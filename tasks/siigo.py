@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 @celery_app.task(name="tasks.siigo.sincronizar_siigo")
-def sincronizar_siigo(customer_id=23, procesos=None, destinatarios=None):
+def sincronizar_siigo(customer_id=23, procesos=None, destinatarios=None, db_config=None):
     """Ejecuta la sincronización de datos desde Siigo para el mes actual."""
     from tasks.correo import enviar_correo
 
@@ -20,6 +20,21 @@ def sincronizar_siigo(customer_id=23, procesos=None, destinatarios=None):
     script_file = os.path.join(project_dir, "scripts", "siigo_script.py")
     venv_python = os.path.join(project_dir, ".venv", "bin", "python3")
     python_bin = venv_python if os.path.isfile(venv_python) else "python3"
+
+    # Construir entorno para el subprocess: parte del env actual y aplica
+    # los campos de db_config (host, port, user, password, database) si existen.
+    env_subprocess = os.environ.copy()
+    if db_config:
+        mapeo = {
+            "host": "DB_HOST",
+            "port": "DB_PORT",
+            "user": "DB_USER",
+            "password": "DB_PASSWORD",
+            "database": "DB_DATABASE",
+        }
+        for campo, var in mapeo.items():
+            if campo in db_config:
+                env_subprocess[var] = str(db_config[campo])
 
     hoy = date.today()
     fecha_inicio = hoy.replace(day=1).strftime("%Y-%m-%d")
@@ -44,6 +59,7 @@ def sincronizar_siigo(customer_id=23, procesos=None, destinatarios=None):
             text=True,
             cwd=os.path.dirname(script_file),
             timeout=600,
+            env=env_subprocess,
         )
 
         if resultado.returncode == 0:

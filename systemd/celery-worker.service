@@ -1,0 +1,17 @@
+[Unit]
+Description=Celery Worker - Scheduler
+After=redis.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+
+WorkingDirectory=/usr/share/nginx/html/scheduler
+EnvironmentFile=/usr/share/nginx/html/scheduler/.env
+ExecStart=/usr/share/nginx/html/scheduler/.venv/bin/celery -A app worker --loglevel=info
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

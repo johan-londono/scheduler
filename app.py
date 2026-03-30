@@ -2,7 +2,6 @@ import os
 import sys
 import logging
 
-import yaml
 from dotenv import load_dotenv
 from celery import Celery
 from celery.schedules import crontab
@@ -32,36 +31,36 @@ celery_app.conf.update(
 )
 
 
-def cargar_configuracion():
-    """Lee el archivo tasks.yaml y retorna la lista de tareas."""
-    config_path = os.path.join(os.path.dirname(__file__), "config", "tasks.yaml")
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-    return config.get("tasks", [])
-
-
-def construir_crontab(schedule):
-    """Convierte un dict de schedule YAML a un objeto crontab de Celery."""
+def construir_crontab(tarea):
+    """Convierte los campos de schedule de una fila de DB a un objeto crontab de Celery."""
     return crontab(
-        minute=schedule.get("minute", "*"),
-        hour=schedule.get("hour", "*"),
-        day_of_week=schedule.get("day_of_week", "*"),
-        day_of_month=schedule.get("day_of_month", "*"),
-        month_of_year=schedule.get("month_of_year", "*"),
+        minute=tarea.get("minute", "*"),
+        hour=tarea.get("hour", "*"),
+        day_of_week=tarea.get("day_of_week", "*"),
+        day_of_month=tarea.get("day_of_month", "*"),
+        month_of_year=tarea.get("month_of_year", "*"),
     )
 
 
 def registrar_tareas():
-    """Lee la configuración YAML y registra las tareas en beat_schedule."""
-    tareas = cargar_configuracion()
+    """Lee las tareas activas de la base de datos y las registra en beat_schedule."""
+    from db import obtener_tareas_activas
+
+    tareas = obtener_tareas_activas()
     beat_schedule = {}
 
     for tarea in tareas:
         nombre = tarea["name"]
         funcion = tarea["function"]
-        schedule = construir_crontab(tarea["schedule"])
-        args = tarea.get("args", [])
-        kwargs = tarea.get("kwargs", {})
+        schedule = construir_crontab(tarea)
+        args = tarea.get("args") or []
+        kwargs = tarea.get("kwargs") or {}
+
+        # Si la tarea tiene db_config, lo inyecta como kwarg para que
+        # el módulo de tarea lo use al invocar su subprocess.
+        db_config = tarea.get("db_config")
+        if db_config:
+            kwargs = {**kwargs, "db_config": db_config}
 
         beat_schedule[nombre] = {
             "task": funcion,
