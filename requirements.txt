@@ -6,3 +6,5 @@ requests
 rich
 fastapi
 uvicorn[standard]
+PyJWT[crypto]
+passlib[bcrypt]

@@ -10,7 +10,7 @@ load_dotenv(os.path.join(_project_dir, ".env"))
 if _project_dir not in sys.path:
     sys.path.insert(0, _project_dir)
 
-from api.routers import tasks, credentials, system
+from api.routers import auth, tasks, credentials, system
 
 app = FastAPI(
     title="Scheduler API",
@@ -18,6 +18,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
+app.include_router(auth.router,        prefix="/auth",        tags=["auth"])
 app.include_router(tasks.router,       prefix="/tasks",       tags=["tasks"])
 app.include_router(credentials.router, prefix="/credentials", tags=["credentials"])
 app.include_router(system.router,      prefix="/system",      tags=["system"])

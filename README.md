@@ -92,6 +92,68 @@ PATCH /credentials/2   {"env_vars": {"DOMINUS_ESUITE_PASSWORD": "nueva"}}
 POST /tasks/sincronizar_siigo_diario/run
 ```
 
+## Autenticación JWT
+
+Todos los endpoints (excepto `/auth/*`) requieren un Bearer token.
+
+### Setup inicial
+
+```bash
+# 1. Generar JWT_SECRET_KEY y agregarla al .env
+python3 -c "import secrets; print(secrets.token_hex(64))"
+
+# 2. Instalar dependencias nuevas
+.venv/bin/pip install -r requirements.txt
+
+# 3. Crear tablas de auth y primer usuario admin
+python3 scripts/crear_usuarios.py --email admin@scheduler.local
+
+# 4. Crear usuarios adicionales (opcional)
+python3 scripts/crear_usuarios.py --email ops@empresa.com --rol operator
+python3 scripts/crear_usuarios.py --email auditor@empresa.com --rol viewer
+```
+
+> `scripts/crear_usuarios.py` no está en el repositorio — transferirlo manualmente al servidor.
+
+### Endpoints de auth
+
+| Método | Ruta | Acción |
+|--------|------|--------|
+| POST | `/auth/login` | Email + password → `access_token` + `refresh_token` |
+| POST | `/auth/refresh` | Rota el refresh token, emite uno nuevo |
+| POST | `/auth/logout` | Revoca el refresh token (siempre 204) |
+
+```bash
+# Login
+TOKEN=$(curl -s -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@scheduler.local","password":"..."}' | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# Usar el token
+curl http://localhost:8080/tasks -H "Authorization: Bearer $TOKEN"
+```
+
+### Roles y permisos
+
+| Rol | Acceso |
+|-----|--------|
+| `viewer` | GET /tasks, GET /credentials, GET /system/status |
+| `operator` | viewer + POST /tasks/{name}/run |
+| `admin` | todo, incluyendo POST/PATCH/DELETE y POST /system/restart |
+
+> La jerarquía es acumulativa: `admin` incluye todo lo de `operator` y `viewer`.
+
+### Extensibilidad
+
+El punto de extensión es `get_current_user()` en `api/deps.py`. Para agregar API Keys:
+```python
+def get_current_user(request: Request, conn=Depends(get_db)):
+    if api_key := request.headers.get("X-API-Key"):
+        return _autenticar_por_api_key(conn, api_key)
+    # fallback a JWT...
+```
+Ningún router requiere cambios.
+
 ## Campos de schedule
 
 | Campo | Valores | Ejemplo |

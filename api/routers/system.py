@@ -4,7 +4,7 @@ import subprocess
 import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException
 
-from api.deps import get_db
+from api.deps import get_db, require_role
 
 router = APIRouter()
 
@@ -12,7 +12,7 @@ _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 
 
 @router.get("/status")
-def status(conn=Depends(get_db)):
+def status(conn=Depends(get_db), _=Depends(require_role("viewer"))):
     """Muestra las tareas activas actualmente registradas en la DB."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
@@ -27,7 +27,7 @@ def status(conn=Depends(get_db)):
 
 
 @router.post("/restart")
-def restart_services():
+def restart_services(_=Depends(require_role("admin"))):
     """Reinicia celery-worker y celery-beat para aplicar cambios en la tabla.
 
     Requiere que el proceso uvicorn tenga permiso de ejecutar systemctl sin

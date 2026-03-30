@@ -4,7 +4,7 @@ import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.deps import get_db
+from api.deps import get_db, require_role
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ class CredentialPatch(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("")
-def list_credentials(conn=Depends(get_db)):
+def list_credentials(conn=Depends(get_db), _=Depends(require_role("viewer"))):
     """Lista todos los sets de credenciales (valores sensibles enmascarados)."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
@@ -53,7 +53,7 @@ def list_credentials(conn=Depends(get_db)):
 
 
 @router.post("", status_code=201)
-def create_credential(body: CredentialCreate, conn=Depends(get_db)):
+def create_credential(body: CredentialCreate, conn=Depends(get_db), _=Depends(require_role("admin"))):
     """Crea un nuevo set de credenciales."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         try:
@@ -70,7 +70,7 @@ def create_credential(body: CredentialCreate, conn=Depends(get_db)):
 
 
 @router.patch("/{credential_id}")
-def update_credential(credential_id: int, body: CredentialPatch, conn=Depends(get_db)):
+def update_credential(credential_id: int, body: CredentialPatch, conn=Depends(get_db), _=Depends(require_role("admin"))):
     """Fusiona env_vars con los valores existentes (no reemplaza el set completo)."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -86,7 +86,7 @@ def update_credential(credential_id: int, body: CredentialPatch, conn=Depends(ge
 
 
 @router.delete("/{credential_id}", status_code=204)
-def delete_credential(credential_id: int, conn=Depends(get_db)):
+def delete_credential(credential_id: int, conn=Depends(get_db), _=Depends(require_role("admin"))):
     """Elimina un set de credenciales. Falla si alguna tarea lo referencia."""
     with conn.cursor() as cur:
         try:

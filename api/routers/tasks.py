@@ -5,7 +5,7 @@ import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.deps import get_db
+from api.deps import get_db, require_role
 
 router = APIRouter()
 
@@ -42,7 +42,7 @@ class TaskPatch(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("")
-def list_tasks(conn=Depends(get_db)):
+def list_tasks(conn=Depends(get_db), _=Depends(require_role("viewer"))):
     """Lista todas las tareas con el nombre del set de credenciales asignado."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
@@ -57,7 +57,7 @@ def list_tasks(conn=Depends(get_db)):
 
 
 @router.post("", status_code=201)
-def create_task(body: TaskCreate, conn=Depends(get_db)):
+def create_task(body: TaskCreate, conn=Depends(get_db), _=Depends(require_role("admin"))):
     """Crea una nueva tarea. Requiere reiniciar los servicios para que surta efecto."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         try:
@@ -81,7 +81,7 @@ def create_task(body: TaskCreate, conn=Depends(get_db)):
 
 
 @router.patch("/{name}")
-def update_task(name: str, body: TaskPatch, conn=Depends(get_db)):
+def update_task(name: str, body: TaskPatch, conn=Depends(get_db), _=Depends(require_role("admin"))):
     """Actualiza parcialmente una tarea. Solo los campos enviados se modifican."""
     campos = body.model_dump(exclude_none=True)
     if not campos:
@@ -110,7 +110,7 @@ def update_task(name: str, body: TaskPatch, conn=Depends(get_db)):
 
 
 @router.delete("/{name}", status_code=204)
-def delete_task(name: str, conn=Depends(get_db)):
+def delete_task(name: str, conn=Depends(get_db), _=Depends(require_role("admin"))):
     """Elimina una tarea permanentemente."""
     with conn.cursor() as cur:
         cur.execute("DELETE FROM scheduler_tasks WHERE name = %s", (name,))
@@ -121,7 +121,7 @@ def delete_task(name: str, conn=Depends(get_db)):
 
 
 @router.post("/{name}/run")
-def run_task(name: str, conn=Depends(get_db)):
+def run_task(name: str, conn=Depends(get_db), _=Depends(require_role("operator"))):
     """Encola la tarea en Redis para ejecución inmediata (requiere worker activo)."""
     from celery import Celery
     import os

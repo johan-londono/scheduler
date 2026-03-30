@@ -23,3 +23,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Scripts sensibles (gestión de usuarios/credenciales — no exponer en repositorio)
+scripts/crear_usuarios.py
+scripts/migrar_db.py
+
+# Configuración con datos de clientes e IPs internas
+config/tasks.yaml
