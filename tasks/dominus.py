@@ -9,7 +9,7 @@ from app import celery_app
 logger = logging.getLogger(__name__)
 
 
-def _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin, timeout=900, destinatarios=None):
+def _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin, timeout=900, destinatarios=None, env_config=None):
     """Lógica compartida para ejecutar el script de Dominus y parsear resultados."""
     from tasks.correo import enviar_correo
 
@@ -17,6 +17,12 @@ def _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin,
     script_file = os.path.join(project_dir, "scripts", "dominus_script.py")
     venv_python = os.path.join(project_dir, ".venv", "bin", "python3")
     python_bin = venv_python if os.path.isfile(venv_python) else "python3"
+
+    # Construir entorno para el subprocess: hereda el env actual y aplica
+    # los overrides de env_config (credenciales API Dominus desde la tabla).
+    env_subprocess = os.environ.copy()
+    if env_config:
+        env_subprocess.update({k: str(v) for k, v in env_config.items()})
 
     resultados = []
 
@@ -42,6 +48,7 @@ def _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin,
                 text=True,
                 cwd=os.path.dirname(script_file),
                 timeout=timeout,
+                env=env_subprocess,
             )
 
             if resultado.returncode == 0:
@@ -89,7 +96,7 @@ def _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin,
 
 
 @celery_app.task(name="tasks.dominus.sincronizar_dominus")
-def sincronizar_dominus(customer_id=26, branch_id=1054, procesos=None, destinatarios=None):
+def sincronizar_dominus(customer_id=26, branch_id=1054, procesos=None, destinatarios=None, env_config=None):
     """Ejecuta la sincronización de datos desde Dominus para el día anterior."""
     if procesos is None:
         procesos = ["invoices", "consolidated"]
@@ -97,11 +104,11 @@ def sincronizar_dominus(customer_id=26, branch_id=1054, procesos=None, destinata
     ayer = date.today() - timedelta(days=1)
     fecha = ayer.strftime("%Y-%m-%d")
 
-    return _ejecutar_dominus(customer_id, branch_id, procesos, fecha, fecha, timeout=900, destinatarios=destinatarios)
+    return _ejecutar_dominus(customer_id, branch_id, procesos, fecha, fecha, timeout=900, destinatarios=destinatarios, env_config=env_config)
 
 
 @celery_app.task(name="tasks.dominus.sincronizar_dominus_mensual")
-def sincronizar_dominus_mensual(customer_id=26, branch_id=1054, procesos=None, destinatarios=None):
+def sincronizar_dominus_mensual(customer_id=26, branch_id=1054, procesos=None, destinatarios=None, env_config=None):
     """Ejecuta la sincronización completa del mes anterior (1ro de cada mes a las 2AM)."""
     if procesos is None:
         procesos = ["invoices", "consolidated"]
@@ -116,4 +123,4 @@ def sincronizar_dominus_mensual(customer_id=26, branch_id=1054, procesos=None, d
     fecha_fin = ultimo_dia_mes_anterior.strftime("%Y-%m-%d")
 
     # Timeout más alto para sincronización mensual completa (2 horas)
-    return _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin, timeout=7200, destinatarios=destinatarios)
+    return _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin, timeout=7200, destinatarios=destinatarios, env_config=env_config)

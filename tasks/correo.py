@@ -10,6 +10,17 @@ from app import celery_app
 
 logger = logging.getLogger(__name__)
 
+_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates")
+
+
+def _cargar_plantilla(nombre, asunto, mensaje, ahora):
+    """Carga templates/nombre.html e interpola {asunto}, {mensaje}, {ahora}."""
+    ruta = os.path.join(_TEMPLATES_DIR, f"{nombre}.html")
+    if not os.path.isfile(ruta):
+        raise FileNotFoundError(f"Plantilla no encontrada: {ruta}")
+    with open(ruta, "r", encoding="utf-8") as f:
+        return f.read().format(asunto=asunto, mensaje=mensaje, ahora=ahora)
+
 
 def _obtener_numero_correo():
     """Obtiene un consecutivo para correos de prueba usando Redis."""
@@ -142,7 +153,7 @@ def _construir_html(asunto, mensaje, datos_reporte, ahora):
 
 
 @celery_app.task(name="tasks.correo.enviar_correo")
-def enviar_correo(asunto="Correo programado", mensaje="Mensaje automático del scheduler", destinatarios=None, datos_reporte=None):
+def enviar_correo(asunto="Correo programado", mensaje="Mensaje automático del scheduler", destinatarios=None, datos_reporte=None, plantilla=None):
     """Envía un correo HTML usando configuración MAIL_* o SMTP_* por variables de entorno."""
     ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     mailer = (os.environ.get("MAIL_MAILER") or "smtp").lower()
@@ -174,12 +185,22 @@ def enviar_correo(asunto="Correo programado", mensaje="Mensaje automático del s
     email["From"] = remitente
     email["To"] = ", ".join(destinatarios)
 
-    # Texto plano como fallback
+    # Texto plano siempre presente como fallback
     email.set_content(mensaje)
 
-    # Contenido HTML
-    html = _construir_html(asunto, mensaje, datos_reporte, ahora)
-    email.add_alternative(html, subtype="html")
+    # Contenido HTML segun plantilla elegida
+    if plantilla == "plain":
+        # Sin HTML: solo texto plano
+        pass
+    elif plantilla is None or plantilla == "default":
+        html = _construir_html(asunto, mensaje, datos_reporte, ahora)
+        email.add_alternative(html, subtype="html")
+    else:
+        try:
+            html = _cargar_plantilla(plantilla, asunto, mensaje, ahora)
+            email.add_alternative(html, subtype="html")
+        except FileNotFoundError as e:
+            logger.error(f"[{ahora}] {e}. Se enviará solo texto plano.")
 
     logger.info(f"[{ahora}] Enviando correo a {', '.join(destinatarios)}...")
     with smtplib.SMTP(smtp_host, smtp_port) as servidor:

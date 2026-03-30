@@ -23,12 +23,36 @@ Scheduler de tareas basado en **Celery 5 + Celery Beat + Redis**. Las tareas se 
   - `scripts/dominus_script.py` — Cliente completo de API Dominus con chunking adaptativo
   - `scripts/migrar_db.py` — Crea la tabla `scheduler_tasks` y la puebla desde `config/tasks.yaml`
 
-## Tabla scheduler_tasks
+## Esquema de base de datos
+
+### scheduler_credentials
+Sets de credenciales reutilizables. Cada fila es un conjunto de variables de
+entorno que se inyectan al subprocess de la tarea que lo referencie.
 
 ```sql
-CREATE TABLE IF NOT EXISTS scheduler_tasks (
+CREATE TABLE scheduler_credentials (
+    id       SERIAL PRIMARY KEY,
+    name     VARCHAR(100) UNIQUE NOT NULL,  -- ej: "siigo_api", "dominus_api"
+    env_vars JSONB NOT NULL DEFAULT '{}'   -- {"VAR": "valor", ...}
+);
+```
+
+Sets actuales: `siigo_api` (credenciales API Siigo + DB ereports), `dominus_api`
+(credenciales API Dominus/ESuite).
+
+Para actualizar credenciales de Dominus (afecta ambas tareas automaticamente):
+```sql
+UPDATE scheduler_credentials
+SET env_vars = env_vars || '{"DOMINUS_ESUITE_PASSWORD": "nueva"}'
+WHERE name = 'dominus_api';
+```
+
+### scheduler_tasks
+
+```sql
+CREATE TABLE scheduler_tasks (
     id             SERIAL PRIMARY KEY,
-    name           VARCHAR(100) UNIQUE NOT NULL,  -- identificador unico
+    name           VARCHAR(100) UNIQUE NOT NULL,
     function       VARCHAR(200) NOT NULL,          -- fully-qualified: tasks.modulo.funcion
     minute         VARCHAR(20)  NOT NULL DEFAULT '*',
     hour           VARCHAR(20)  NOT NULL DEFAULT '*',
@@ -37,24 +61,15 @@ CREATE TABLE IF NOT EXISTS scheduler_tasks (
     month_of_year  VARCHAR(20)  NOT NULL DEFAULT '*',
     args           JSONB        NOT NULL DEFAULT '[]',
     kwargs         JSONB        NOT NULL DEFAULT '{}',
-    db_config      JSONB        NULL,              -- NULL = tarea no usa DB
-    activa         BOOLEAN      NOT NULL DEFAULT TRUE  -- FALSE = desactivada sin borrar
+    credentials_id INTEGER      REFERENCES scheduler_credentials(id),  -- NULL = sin credenciales
+    activa         BOOLEAN      NOT NULL DEFAULT TRUE
 );
 ```
 
-**Columna `db_config`:** para tareas que ejecutan subprocesos con acceso a PostgreSQL.
-Los campos soportados son `host`, `port`, `user`, `password`, `database`. Solo se necesita
-especificar los que difieren de las variables `DB_*` del `.env`. Ejemplo:
+`db.py` hace JOIN con `scheduler_credentials` y expone `env_vars` como `env_config`
+a `app.py`. Las tareas aplican `env.update(env_config)` antes de llamar al subprocess.
 
-```json
-{"database": "ereports"}
-{"host": "10.0.0.5", "database": "otra_db", "user": "lector"}
-```
-
-`app.py` inyecta `db_config` como kwarg a la tarea. La tarea lo aplica como override
-de variables de entorno al invocar el subprocess (siigo_script.py, etc.).
-
-Para agregar o modificar tareas: editar la tabla en la DB y reiniciar los servicios.
+Para agregar o modificar tareas: editar las tablas en la DB y reiniciar los servicios.
 
 ## Tareas registradas
 
@@ -70,7 +85,14 @@ Para agregar o modificar tareas: editar la tabla en la DB y reiniciar los servic
 ### Migracion inicial (solo una vez)
 
 ```bash
+# Instalacion nueva: crea ambas tablas y carga datos del .env actual
 python3 scripts/migrar_db.py
+
+# Instalacion existente con db_config: migra a env_config
+python3 scripts/migrar_env_config.py
+
+# Instalacion existente con env_config: extrae a tabla scheduler_credentials
+python3 scripts/migrar_credentials.py
 ```
 
 ### Desarrollo

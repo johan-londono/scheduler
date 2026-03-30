@@ -56,11 +56,11 @@ def registrar_tareas():
         args = tarea.get("args") or []
         kwargs = tarea.get("kwargs") or {}
 
-        # Si la tarea tiene db_config, lo inyecta como kwarg para que
-        # el módulo de tarea lo use al invocar su subprocess.
-        db_config = tarea.get("db_config")
-        if db_config:
-            kwargs = {**kwargs, "db_config": db_config}
+        # Si la tarea tiene env_config, lo inyecta como kwarg para que
+        # el módulo de tarea lo aplique como overrides de env al subprocess.
+        env_config = tarea.get("env_config")
+        if env_config:
+            kwargs = {**kwargs, "env_config": env_config}
 
         beat_schedule[nombre] = {
             "task": funcion,
