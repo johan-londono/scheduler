@@ -4,12 +4,12 @@ After=redis.service
 
 [Service]
 Type=simple
-User=www-data
-Group=www-data
+User=DEPLOY_USER
+Group=DEPLOY_GROUP
 
-WorkingDirectory=/usr/share/nginx/html/scheduler
-EnvironmentFile=/usr/share/nginx/html/scheduler/.env
-ExecStart=/usr/share/nginx/html/scheduler/.venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8080
+WorkingDirectory=DEPLOY_PATH
+EnvironmentFile=DEPLOY_PATH/.env
+ExecStart=DEPLOY_PATH/.venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=10
 

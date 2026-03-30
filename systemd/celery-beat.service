@@ -4,12 +4,12 @@ After=redis.service
 
 [Service]
 Type=simple
-User=www-data
-Group=www-data
+User=DEPLOY_USER
+Group=DEPLOY_GROUP
 
-WorkingDirectory=/usr/share/nginx/html/scheduler
-EnvironmentFile=/usr/share/nginx/html/scheduler/.env
-ExecStart=/usr/share/nginx/html/scheduler/.venv/bin/celery -A app beat --loglevel=info
+WorkingDirectory=DEPLOY_PATH
+EnvironmentFile=DEPLOY_PATH/.env
+ExecStart=DEPLOY_PATH/.venv/bin/celery -A app beat --loglevel=info
 Restart=always
 RestartSec=10
 
