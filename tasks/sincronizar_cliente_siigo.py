@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 @celery_app.task(name="tasks.siigo.sincronizar_siigo")
 def sincronizar_siigo(customer_id=23, procesos=None, destinatarios=None, env_config=None):
     """Ejecuta la sincronización de datos desde Siigo para el mes actual."""
-    from tasks.correo import enviar_correo
+    from tasks.envio_correo import enviar_correo
 
     if procesos is None:
         procesos = ["invoices", "customers", "products", "users", "credit-notes"]

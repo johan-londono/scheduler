@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 def _ejecutar_dominus(customer_id, branch_id, procesos, fecha_inicio, fecha_fin, timeout=900, destinatarios=None, env_config=None):
     """Lógica compartida para ejecutar el script de Dominus y parsear resultados."""
-    from tasks.correo import enviar_correo
+    from tasks.envio_correo import enviar_correo
 
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     script_file = os.path.join(project_dir, "scripts", "dominus_script.py")

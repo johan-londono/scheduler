@@ -33,7 +33,7 @@ def _verificar_endpoint(nombre, url, timeout=15):
 @celery_app.task(name="tasks.monitor.verificar_apis")
 def verificar_apis(apis=None, destinatario="johan.londono@eholding.com.co"):
     """Verifica el estado de multiples APIs y envia correo con el resultado."""
-    from tasks.correo import enviar_correo
+    from tasks.envio_correo import enviar_correo
 
     if apis is None:
         apis = APIS_DEFAULT

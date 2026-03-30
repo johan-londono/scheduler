@@ -1,0 +1,17 @@
+[Unit]
+Description=Scheduler API - FastAPI/Uvicorn
+After=redis.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+
+WorkingDirectory=/usr/share/nginx/html/scheduler
+EnvironmentFile=/usr/share/nginx/html/scheduler/.env
+ExecStart=/usr/share/nginx/html/scheduler/.venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

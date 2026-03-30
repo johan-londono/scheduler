@@ -77,8 +77,7 @@ def registrar_tareas():
 registrar_tareas()
 
 # Importar módulos de tareas
-import tasks.mantenimiento  # noqa: F401, E402
-import tasks.siigo  # noqa: F401, E402
-import tasks.correo  # noqa: F401, E402
-import tasks.dominus  # noqa: F401, E402
-import tasks.monitor  # noqa: F401, E402
+import tasks.sincronizar_cliente_siigo  # noqa: F401, E402
+import tasks.envio_correo  # noqa: F401, E402
+import tasks.sincronizar_cliente_dominus  # noqa: F401, E402
+import tasks.monitor_estado_apis  # noqa: F401, E402
