@@ -131,11 +131,11 @@ celery -A app call tasks.sincronizar_cliente_siigo.sincronizar_siigo
 ## Produccion con systemd
 
 Tres servicios en `systemd/`: `celery-worker`, `celery-beat`, `celery-api`.
-Apuntan a `/usr/share/nginx/html/scheduler` con usuario `www-data`.
+Los `.service` son plantillas con `DEPLOY_PATH` / `DEPLOY_USER` / `DEPLOY_GROUP` como placeholders.
 
 ```bash
-# Instalar en servidor nuevo
-sudo bash systemd/instalar.sh
+# Instalar en servidor nuevo (sustituye placeholders y habilita servicios)
+sudo bash systemd/instalar.sh --path /ruta/del/proyecto --user nombre_usuario
 
 # Gestion diaria
 sudo bash scripts/reiniciar.sh   # tras cambios en DB, codigo o .env

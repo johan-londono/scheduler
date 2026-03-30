@@ -195,7 +195,8 @@ La tarea `tasks.envio_correo.enviar_correo` acepta el kwarg `plantilla`:
 
 ```bash
 # Instalar los 3 servicios (worker, beat, api) en un servidor nuevo
-sudo bash systemd/instalar.sh
+# Los archivos .service son plantillas — instalar.sh sustituye los placeholders
+sudo bash systemd/instalar.sh --path /ruta/del/proyecto --user nombre_usuario
 
 # Tras cambios en DB, código o .env
 sudo bash scripts/reiniciar.sh
