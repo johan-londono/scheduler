@@ -4,10 +4,8 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
 import jwt
-from passlib.context import CryptContext
-
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 _SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "")
 _ALGORITHM = "HS256"
@@ -18,11 +16,11 @@ _REFRESH_EXPIRE_DAYS = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 # ── Contraseñas ───────────────────────────────────────────────────────────────
 
 def hash_password(plain: str) -> str:
-    return _pwd_ctx.hash(plain)
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
 
 
 def verificar_password(plain: str, hashed: str) -> bool:
-    return _pwd_ctx.verify(plain, hashed)
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
 # ── Access token (JWT) ────────────────────────────────────────────────────────

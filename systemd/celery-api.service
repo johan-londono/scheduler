@@ -9,7 +9,7 @@ Group=DEPLOY_GROUP
 
 WorkingDirectory=DEPLOY_PATH
 EnvironmentFile=DEPLOY_PATH/.env
-ExecStart=DEPLOY_PATH/.venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8080
+ExecStart=DEPLOY_PATH/.venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8014
 Restart=always
 RestartSec=10
 

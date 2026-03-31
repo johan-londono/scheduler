@@ -30,3 +30,6 @@ scripts/migrar_db.py
 
 # Configuración con datos de clientes e IPs internas
 config/tasks.yaml
+
+# Archivos temporales / colecciones locales
+tmp/
