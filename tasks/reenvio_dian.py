@@ -98,7 +98,8 @@ def reenviar_facturas_dian(key_cli: str = None, env_config: dict = None, destina
     from tasks.envio_correo import enviar_correo
 
     resumen = _parsear_resumen(resultado.stdout)
-    cliente_label = f"cliente {key_cli}" if key_cli else "todos los clientes"
+    nombres = resumen.get("nombres_clientes", [])
+    cliente_label = nombres[0] if len(nombres) == 1 else (", ".join(nombres) if nombres else "todos los clientes")
 
     if exito:
         if resumen["errores_cx"] > 0 and resumen["fallidas"] == 0:
@@ -171,7 +172,7 @@ def reenviar_facturas_dian(key_cli: str = None, env_config: dict = None, destina
         mensaje += f"\nError:\n{resultado.stderr[:500]}"
 
     enviar_correo.delay(
-        asunto=f"Reenvío DIAN — {estado_texto}",
+        asunto=f"Reenvío DIAN — {cliente_label} — {estado_texto}",
         mensaje=mensaje,
         datos_reporte=datos_reporte,
         destinatarios=destinatarios,

@@ -132,6 +132,7 @@ async def main(key_cli_filter: str = None) -> None:
         "errores_cx":        con_errores_cx,
         "fallidas_detalle":  todas_fallidas,
         "errores_conexion":  errores_conexion,
+        "nombres_clientes":  [r['nombre'] for r in resultados],
     }
     print(f"RESUMEN_JSON:{json.dumps(resumen_json, ensure_ascii=False)}")
 
