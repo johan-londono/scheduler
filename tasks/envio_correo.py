@@ -54,17 +54,20 @@ def _construir_html(asunto, mensaje, datos_reporte, ahora):
                 </td>
             </tr>"""
 
-        resumen_info = f"""
-        <table style="width:100%;margin-bottom:8px">
+        filas_resumen = ""
+        if datos_reporte.get('customer_id'):
+            filas_resumen += f"""
             <tr>
                 <td style="color:#6b7280;font-size:13px">Customer ID</td>
                 <td style="text-align:right;font-weight:600;font-size:13px;color:#111827">{datos_reporte['customer_id']}</td>
-            </tr>
+            </tr>"""
+        if datos_reporte.get('fecha_inicio') and datos_reporte.get('fecha_fin'):
+            filas_resumen += f"""
             <tr>
                 <td style="color:#6b7280;font-size:13px">Periodo</td>
                 <td style="text-align:right;font-weight:600;font-size:13px;color:#111827">{datos_reporte['fecha_inicio']} &rarr; {datos_reporte['fecha_fin']}</td>
-            </tr>
-        </table>"""
+            </tr>"""
+        resumen_info = f'<table style="width:100%;margin-bottom:8px">{filas_resumen}</table>' if filas_resumen else ""
 
         total = len(datos_reporte["resultados"])
         exitosos = sum(1 for r in datos_reporte["resultados"] if r["estado"] == "OK")

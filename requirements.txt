@@ -2,9 +2,12 @@ celery[redis]
 pyyaml
 python-dotenv
 psycopg2-binary
+asyncpg
+sqlalchemy
 requests
 rich
 fastapi
 uvicorn[standard]
 PyJWT[crypto]
 bcrypt
+httpx

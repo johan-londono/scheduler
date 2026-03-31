@@ -15,6 +15,7 @@ Sistema de tareas programadas con **Celery + Redis + PostgreSQL**, gestionable v
 ```bash
 # 1. Entorno virtual y dependencias
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+sudo .venv/bin/pip install -r requirements.txt
 
 # 2. Crear .env (ver sección Variables de entorno)
 
@@ -153,6 +154,59 @@ def get_current_user(request: Request, conn=Depends(get_db)):
     # fallback a JWT...
 ```
 Ningún router requiere cambios.
+
+## Tareas disponibles
+
+| Función | Descripción | kwargs principales |
+|---------|-------------|-------------------|
+| `tasks.siigo.sincronizar_siigo` | Sincroniza facturas, clientes, productos, etc. desde Siigo | `customer_id`, `procesos`, `destinatarios` |
+| `tasks.sincronizar_cliente_dominus.sincronizar_dominus` | Sincroniza datos desde Dominus/ESuite | `env_config` |
+| `tasks.envio_correo.enviar_correo` | Envía correo con resumen | `asunto`, `mensaje`, `destinatarios`, `plantilla` |
+| `tasks.monitor_estado_apis.verificar_apis` | Verifica el estado de las APIs externas | — |
+| `tasks.reenvio_dian.reenviar_facturas_dian` | Reenvía facturas pendientes a la DIAN (máx. 3 intentos) | `key_cli` (opcional) |
+
+### Configurar reenvío DIAN
+
+```bash
+# 1. Crear set de credenciales con los datos de conexión a la DB principal de esuite
+POST /credentials
+{
+  "name": "esuite_dian",
+  "env_vars": {
+    "MAIN_DB_HOST": "...",
+    "MAIN_DB_PORT": "5432",
+    "MAIN_DB_NAME": "...",
+    "MAIN_DB_USER": "...",
+    "MAIN_DB_PASSWORD": "...",
+    "PROVEEDOR_INTEGRACION": "AVIA",
+    "MAX_INTENTOS": "3"
+  }
+}
+
+# 2. Crear la tarea apuntando al set de credenciales
+POST /tasks
+{
+  "name": "reenvio_dian_automatico",
+  "function": "tasks.reenvio_dian.reenviar_facturas_dian",
+  "hour": "*/2",
+  "minute": "0",
+  "credentials_id": <id del set esuite_dian>
+}
+
+# Para procesar un solo cliente, agregar kwargs:
+POST /tasks
+{
+  "name": "reenvio_dian_cliente_abc",
+  "function": "tasks.reenvio_dian.reenviar_facturas_dian",
+  "hour": "*/1",
+  "minute": "30",
+  "kwargs": {"key_cli": "ABC"},
+  "credentials_id": <id del set esuite_dian>
+}
+```
+
+> Los archivos del servicio viven en `scripts/reenvio_service/`. Los imports de `app.*`
+> se resuelven en tiempo de ejecución desde `esuite_dian_app_v2/`.
 
 ## Campos de schedule
 

@@ -81,3 +81,4 @@ import tasks.sincronizar_cliente_siigo  # noqa: F401, E402
 import tasks.envio_correo  # noqa: F401, E402
 import tasks.sincronizar_cliente_dominus  # noqa: F401, E402
 import tasks.monitor_estado_apis  # noqa: F401, E402
+import tasks.reenvio_dian  # noqa: F401, E402
