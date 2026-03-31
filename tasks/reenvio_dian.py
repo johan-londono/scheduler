@@ -101,10 +101,14 @@ def reenviar_facturas_dian(key_cli: str = None, env_config: dict = None, destina
     cliente_label = f"cliente {key_cli}" if key_cli else "todos los clientes"
 
     if exito:
-        estado_texto = (
-            f"Completado sin errores" if resumen["fallidas"] == 0
-            else f"Completado con {resumen['fallidas']} factura(s) fallida(s)"
-        )
+        if resumen["errores_cx"] > 0 and resumen["fallidas"] == 0:
+            estado_texto = f"Errores de conexión en {resumen['errores_cx']} cliente(s)"
+        elif resumen["fallidas"] > 0 and resumen["errores_cx"] > 0:
+            estado_texto = f"{resumen['fallidas']} factura(s) fallida(s) y {resumen['errores_cx']} error(es) de conexión"
+        elif resumen["fallidas"] > 0:
+            estado_texto = f"Completado con {resumen['fallidas']} factura(s) fallida(s)"
+        else:
+            estado_texto = "Completado sin errores"
     else:
         estado_texto = f"Error de ejecución (código {resultado.returncode})"
 
