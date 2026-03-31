@@ -108,15 +108,23 @@ def reenviar_facturas_dian(key_cli: str = None, env_config: dict = None, destina
     else:
         estado_texto = f"Error de ejecución (código {resultado.returncode})"
 
-    fallos = resumen["fallidas_detalle"]
+    fallos     = resumen.get("fallidas_detalle", [])
+    errores_cx = resumen.get("errores_conexion", [])
 
     resultados_email = []
 
     if resumen["exitosas"] > 0:
         resultados_email.append({
-            "proceso": f"Facturas aceptadas por la DIAN",
+            "proceso": "Facturas aceptadas por la DIAN",
             "estado":  "OK",
             "detalle": f"{resumen['exitosas']} factura(s) procesadas exitosamente",
+        })
+
+    for cx in errores_cx:
+        resultados_email.append({
+            "proceso": f"Sin acceso  —  {cx['cliente']}",
+            "estado":  "ERROR",
+            "detalle": "Falta de permisos de conexión a la base de datos del cliente.",
         })
 
     if fallos:
@@ -128,7 +136,8 @@ def reenviar_facturas_dian(key_cli: str = None, env_config: dict = None, destina
             }
             for f in fallos
         ]
-    elif not resultados_email:
+
+    if not resultados_email:
         resultados_email.append({
             "proceso": f"Facturas enviadas ({cliente_label})",
             "estado":  "OK" if exito else "ERROR",
@@ -144,8 +153,10 @@ def reenviar_facturas_dian(key_cli: str = None, env_config: dict = None, destina
         f"Exitosas            : {resumen['exitosas']}\n"
         f"Fallidas            : {resumen['fallidas']}\n"
     )
-    if resumen["errores_cx"]:
-        mensaje += f"Errores de conexión : {resumen['errores_cx']}\n"
+    if errores_cx:
+        mensaje += f"Errores de conexión : {len(errores_cx)}\n"
+        for cx in errores_cx:
+            mensaje += f"  {cx['cliente']}: Falta de permisos de conexión a la base de datos del cliente.\n"
     if fallos:
         mensaje += "\nDetalle de facturas fallidas:\n"
         for f in fallos:

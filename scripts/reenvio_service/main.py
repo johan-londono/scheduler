@@ -116,13 +116,22 @@ async def main(key_cli_filter: str = None) -> None:
 
     # Línea JSON estructurada para la tarea Celery (correo de notificación)
     todas_fallidas = [f for r in resultados for f in r.get('fallidas_detalle', [])]
+    errores_conexion = [
+        {
+            "key_cli": r['key_cli'],
+            "cliente": r['nombre'],
+            "error":   r['connection_error'],
+        }
+        for r in resultados if r.get('connection_error')
+    ]
     resumen_json = {
-        "clientes":   len(resultados),
-        "facturas":   total_facturas,
-        "exitosas":   total_ok,
-        "fallidas":   total_fail,
-        "errores_cx": con_errores_cx,
-        "fallidas_detalle": todas_fallidas,
+        "clientes":          len(resultados),
+        "facturas":          total_facturas,
+        "exitosas":          total_ok,
+        "fallidas":          total_fail,
+        "errores_cx":        con_errores_cx,
+        "fallidas_detalle":  todas_fallidas,
+        "errores_conexion":  errores_conexion,
     }
     print(f"RESUMEN_JSON:{json.dumps(resumen_json, ensure_ascii=False)}")
 
