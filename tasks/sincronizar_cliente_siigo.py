@@ -12,7 +12,7 @@ SYNC_SIIGO_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath
 
 
 @celery_app.task(name="tasks.siigo.sincronizar_siigo")
-def sincronizar_siigo(customer_id=23, procesos=None, destinatarios=None, env_config=None, plantilla=None, mes_anterior=False):
+def sincronizar_siigo(customer_id, siigo_username, siigo_access_key, procesos=None, destinatarios=None, env_config=None, plantilla=None, mes_anterior=False):
     """Ejecuta la sincronización de datos desde Siigo para el mes actual o el anterior."""
     from tasks.envio_correo import enviar_correo
 
@@ -32,8 +32,6 @@ def sincronizar_siigo(customer_id=23, procesos=None, destinatarios=None, env_con
     api_url = env_subprocess.get("API_SIIGO_URL", "")
     api_user = env_subprocess.get("API_SIIGO_USER", "")
     api_password = env_subprocess.get("API_SIIGO_PASSWORD", "")
-    siigo_username = env_subprocess.get("SIIGO_USERNAME", "")
-    siigo_access_key = env_subprocess.get("SIIGO_ACCESS_KEY", "")
 
     hoy = date.today()
     if mes_anterior:
