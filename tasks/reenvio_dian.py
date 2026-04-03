@@ -171,12 +171,22 @@ def reenviar_facturas_dian(key_cli: str = None, env_config: dict = None, destina
     if not exito and resultado.stderr:
         mensaje += f"\nError:\n{resultado.stderr[:500]}"
 
-    enviar_correo.delay(
-        asunto=f"Reenvío DIAN — {cliente_label} — {estado_texto}",
-        mensaje=mensaje,
-        datos_reporte=datos_reporte,
-        destinatarios=destinatarios,
+    hay_novedades = (
+        not exito
+        or resumen["exitosas"] > 0
+        or resumen["fallidas"] > 0
+        or resumen["errores_cx"] > 0
     )
+
+    if hay_novedades:
+        enviar_correo.delay(
+            asunto=f"Reenvío DIAN — {cliente_label} — {estado_texto}",
+            mensaje=mensaje,
+            datos_reporte=datos_reporte,
+            destinatarios=destinatarios,
+        )
+    else:
+        logger.info("Reenvío DIAN sin novedades, correo omitido.")
 
     return {
         "returncode": resultado.returncode,
