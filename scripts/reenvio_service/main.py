@@ -197,15 +197,33 @@ async def main(key_cli_filter: str = None, tipo: str = None) -> None:
         {"key_cli": r['key_cli'], "cliente": r['nombre'], "error": r['connection_error']}
         for r in todas_listas if r.get('connection_error')
     ]
+    # Desglose por cliente y tipo (solo clientes con documentos encontrados)
+    resultados_por_cliente = []
+    for tipo_label, tipo_resultados in [
+        ("facturas",           res_facturas),
+        ("notas_credito",      res_nc),
+        ("documentos_soporte", res_docsoporte),
+    ]:
+        for r in tipo_resultados:
+            if r['total'] > 0:
+                resultados_por_cliente.append({
+                    "key_cli":  r['key_cli'],
+                    "cliente":  r['nombre'],
+                    "tipo":     tipo_label,
+                    "exitosas": r['exitosas'],
+                    "fallidas": r['fallidas'],
+                    "omitidas": r.get('omitidas', 0),
+                })
     resumen_json = {
-        "clientes":         len(clientes),
-        "facturas":         sum(r['total']    for r in todas_listas),
-        "exitosas":         sum(r['exitosas'] for r in todas_listas),
-        "fallidas":         sum(r['fallidas'] for r in todas_listas),
-        "errores_cx":       len({r['key_cli'] for r in todas_listas if r.get('connection_error')}),
-        "fallidas_detalle": todas_fallidas,
-        "errores_conexion": errores_conexion,
-        "nombres_clientes": [c['nombre_cliente'] for c in clientes],
+        "clientes":                len(clientes),
+        "facturas":                sum(r['total']    for r in todas_listas),
+        "exitosas":                sum(r['exitosas'] for r in todas_listas),
+        "fallidas":                sum(r['fallidas'] for r in todas_listas),
+        "errores_cx":              len({r['key_cli'] for r in todas_listas if r.get('connection_error')}),
+        "fallidas_detalle":        todas_fallidas,
+        "errores_conexion":        errores_conexion,
+        "nombres_clientes":        [c['nombre_cliente'] for c in clientes],
+        "resultados_por_cliente":  resultados_por_cliente,
     }
     print(f"RESUMEN_JSON:{_json.dumps(resumen_json, ensure_ascii=False)}")
 

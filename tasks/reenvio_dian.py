@@ -284,12 +284,13 @@ def enviar_reporte_dian_diario(destinatarios: list = None, **_):
         etiq = entrada["etiqueta"]
         if etiq not in por_tipo:
             por_tipo[etiq] = {
-                "exitosas":          0,
-                "fallidas":          0,
-                "errores_cx":        0,
-                "fallos_detalle":    [],
-                "errores_conexion":  [],
-                "errores_ejecucion": [],
+                "exitosas":            0,
+                "fallidas":            0,
+                "errores_cx":          0,
+                "fallos_detalle":      [],
+                "errores_conexion":    [],
+                "errores_ejecucion":   [],
+                "clientes_detalle":    [],
             }
         res = entrada["resumen"]
         por_tipo[etiq]["exitosas"]         += res.get("exitosas", 0)
@@ -303,6 +304,10 @@ def enviar_reporte_dian_diario(destinatarios: list = None, **_):
                 "returncode": entrada["returncode"],
                 "stderr":     entrada["stderr"],
             })
+        # Desglose por cliente: filtrar los que corresponden a este tipo
+        for r in res.get("resultados_por_cliente", []):
+            if _ETIQUETAS_DIAN.get(r.get("tipo")) == etiq:
+                por_tipo[etiq]["clientes_detalle"].append(r)
 
     total_exitosas = sum(v["exitosas"]   for v in por_tipo.values())
     total_fallidas = sum(v["fallidas"]   for v in por_tipo.values())
@@ -317,11 +322,17 @@ def enviar_reporte_dian_diario(destinatarios: list = None, **_):
     # ── Tabla de resultados para la plantilla HTML ────────────────────────────
     resultados_email = []
     for etiq, datos in por_tipo.items():
-        if datos["exitosas"] > 0:
+        # Una fila por cliente con sus conteos
+        for r in datos["clientes_detalle"]:
+            partes = []
+            if r["exitosas"]: partes.append(f"{r['exitosas']} exitosa(s)")
+            if r["fallidas"]: partes.append(f"{r['fallidas']} fallida(s)")
+            if r["omitidas"]: partes.append(f"{r['omitidas']} omitida(s)")
+            tiene_fallo = r["fallidas"] > 0
             resultados_email.append({
-                "proceso": f"{etiq.capitalize()} aceptados por la DIAN",
-                "estado":  "OK",
-                "detalle": f"{datos['exitosas']} procesado(s) exitosamente",
+                "proceso": f"{etiq.capitalize()} — {r['cliente']}",
+                "estado":  "ERROR" if tiene_fallo else "OK",
+                "detalle": ", ".join(partes) if partes else "Sin documentos procesados",
             })
         for cx in datos["errores_conexion"]:
             resultados_email.append({
@@ -351,6 +362,14 @@ def enviar_reporte_dian_diario(destinatarios: list = None, **_):
             f"  Exitosos   : {datos['exitosas']}\n"
             f"  Fallidos   : {datos['fallidas']}\n"
         )
+        if datos["clientes_detalle"]:
+            mensaje += "  Por cliente:\n"
+            for r in datos["clientes_detalle"]:
+                partes = []
+                if r["exitosas"]: partes.append(f"{r['exitosas']} exitosa(s)")
+                if r["fallidas"]: partes.append(f"{r['fallidas']} fallida(s)")
+                if r["omitidas"]: partes.append(f"{r['omitidas']} omitida(s)")
+                mensaje += f"    {r['cliente']}: {', '.join(partes) if partes else 'sin documentos'}\n"
         if datos["errores_cx"]:
             mensaje += f"  Errores cx : {datos['errores_cx']}\n"
             for cx in datos["errores_conexion"]:
