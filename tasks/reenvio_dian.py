@@ -8,20 +8,19 @@ de soporte pendientes de aceptación por la DIAN.
 Arquitectura
 ------------
 El scheduler invoca como subprocess el módulo ``reenvio_service.main`` de
-``scripts/``, pasando ``--tipo`` para seleccionar el tipo
-de documento.  El script procesa todos los clientes con ``transmitir=true``
-(o solo el indicado en ``key_cli``) y emite al final de su stdout la línea::
+``scripts/``, una vez por cada combinación (cliente, tipo).  Cada invocación
+emite al final de su stdout la línea::
 
     RESUMEN_JSON:{...}
 
 que este módulo parsea y acumula en Redis.  A las 17:00 la tarea
 ``enviar_reporte_dian_diario`` consolida todas las ejecuciones del día y
-envía un único correo de notificación.
+envía un único correo con el desglose por tipo y por cliente.
 
 Tipos de documento soportados
 ------------------------------
 +-----------------------+----------------+----------------------------------+
-| tipo_doc (kwarg)      | --tipo al CLI  | Documentos procesados            |
+| tipo_doc              | --tipo al CLI  | Documentos procesados            |
 +=======================+================+==================================+
 | ``"facturas"``        | ``facturas``   | Facturas electrónicas (FE)       |
 +-----------------------+----------------+----------------------------------+
@@ -30,16 +29,55 @@ Tipos de documento soportados
 | ``"documentos_soporte"`` | ``docsoporte`` | Documentos de soporte (DS)    |
 +-----------------------+----------------+----------------------------------+
 
+Kwargs de la tarea principal (``reenviar_documentos_dian``)
+------------------------------------------------------------
+tipo_doc   str        Tipo único (retrocompatibilidad). Default: "facturas".
+tipos_doc  list[str]  Uno o varios tipos en una sola ejecución.
+                      Ej: ["facturas", "notas_credito"]
+key_cli    str        Clave de un único cliente. Sin valor = todos.
+key_clis   list[str]  Varios clientes en una sola ejecución.
+                      Ej: ["abc123", "def456"]
+env_config dict       Variables de entorno inyectadas al subprocess.
+
+Ejemplos de kwargs en la DB
+----------------------------
+# Un cliente, un tipo (uso mínimo)
+{"key_cli": "abc123", "tipo_doc": "facturas"}
+
+# Varios clientes, un tipo
+{"key_clis": ["abc123", "def456"], "tipo_doc": "facturas"}
+
+# Un cliente, varios tipos
+{"key_cli": "abc123", "tipos_doc": ["facturas", "notas_credito"]}
+
+# Varios clientes, varios tipos
+{"key_clis": ["abc123", "def456"], "tipos_doc": ["facturas", "notas_credito"]}
+
+# Todos los clientes, todos los tipos (sin key_cli/key_clis)
+{"tipos_doc": ["facturas", "notas_credito", "documentos_soporte"]}
+
+Filtros de fecha
+----------------
+Por defecto se procesan solo documentos del mes en curso.  Se puede
+sobrescribir via env_config (o variables de entorno del worker):
+
+  FILTRO_DIA   = YYYY-MM-DD          (día específico)
+  FILTRO_MES   = YYYY-MM             (mes específico)
+  FILTRO_ANIO  = YYYY                (año completo)
+  FILTRO_DESDE + FILTRO_HASTA        (rango personalizado YYYY-MM-DD)
+
 Tareas registradas
 ------------------
-- ``reenviar_documentos_dian``  — ejecuta el reenvío y acumula en Redis
+- ``reenviar_documentos_dian``   — ejecuta el reenvío y acumula en Redis
 - ``enviar_reporte_dian_diario`` — consolida y envía el correo (17:00)
 
 Alias de compatibilidad
 -----------------------
-``reenviar_facturas_dian`` y ``reenviar_documentos_soporte_dian`` mantienen
-los nombres originales registrados en la DB; ambos delegan a
-``reenviar_documentos_dian`` con el ``tipo_doc`` correspondiente.
+``reenviar_facturas_dian`` delega a ``reenviar_documentos_dian`` aceptando
+los mismos kwargs.  Default tipo_doc="facturas" para no romper entradas
+existentes en la DB.
+
+``reenviar_documentos_soporte_dian`` es un alias fijo a tipo_doc="documentos_soporte".
 
 Extender con un nuevo tipo
 --------------------------
@@ -207,50 +245,73 @@ def _ejecutar_reenvio(tipo_doc: str, key_cli: str, env_subprocess: dict) -> subp
 
 @celery_app.task(name="tasks.reenvio_dian.reenviar_documentos_dian")
 def reenviar_documentos_dian(
-    tipo_doc: str,
+    tipo_doc: str = None,
+    tipos_doc: list = None,
     key_cli: str = None,
+    key_clis: list = None,
     env_config: dict = None,
+    **_,
 ):
     """
     Ejecuta el reenvío DIAN y acumula el resultado en Redis para el reporte
     consolidado de las 17:00.
 
     kwargs aceptados:
-        tipo_doc   — tipo de documento a procesar:
-                       "facturas"            → --tipo facturas
-                       "notas_credito"       → --tipo nc
-                       "documentos_soporte"  → --tipo docsoporte
-        key_cli    — procesar solo este cliente (vacío = todos)
+        tipos_doc  — lista de tipos a procesar:
+                       ["facturas"]
+                       ["facturas", "notas_credito"]
+                       ["facturas", "notas_credito", "documentos_soporte"]
+        tipo_doc   — tipo único (retrocompatibilidad); ignorado si se usa tipos_doc.
+        key_clis   — lista de clientes a procesar: ["abc123", "def456"]
+        key_cli    — cliente único (retrocompatibilidad); ignorado si se usa key_clis.
+                     Sin valor = todos los clientes.
         env_config — variables de entorno inyectadas al subprocess (credenciales)
     """
+    tipos   = tipos_doc if tipos_doc else [tipo_doc]
+    clientes = key_clis if key_clis else ([key_cli] if key_cli else [None])
+
+    if not tipos or any(t not in _TIPOS_CLI_DIAN for t in tipos):
+        invalidos = [t for t in tipos if t not in _TIPOS_CLI_DIAN]
+        raise ValueError(
+            f"tipo(s) inválido(s): {invalidos}. Opciones: {list(_TIPOS_CLI_DIAN)}"
+        )
+
     env_subprocess = os.environ.copy()
     if env_config:
         env_subprocess.update({k: str(v) for k, v in env_config.items()})
 
-    resultado = _ejecutar_reenvio(tipo_doc, key_cli, env_subprocess)
+    resultados = []
+    for cli in clientes:
+        for tipo in tipos:
+            etiqueta = _ETIQUETAS_DIAN[tipo]
+            cli_label = cli or "todos"
+            logger.info(f"Procesando [{etiqueta}] cliente={cli_label}")
 
-    if resultado.stdout:
-        for linea in resultado.stdout.splitlines():
-            logger.info(linea)
-    if resultado.stderr:
-        for linea in resultado.stderr.splitlines():
-            logger.error(linea)
+            resultado = _ejecutar_reenvio(tipo, cli, env_subprocess)
 
-    exito    = resultado.returncode == 0
-    etiqueta = _ETIQUETAS_DIAN[tipo_doc]
+            if resultado.stdout:
+                for linea in resultado.stdout.splitlines():
+                    logger.info(linea)
+            if resultado.stderr:
+                for linea in resultado.stderr.splitlines():
+                    logger.error(linea)
 
-    if exito:
-        logger.info(f"Reenvío DIAN [{etiqueta}] completado. Resultado acumulado para reporte 17:00.")
-    else:
-        logger.error(f"Reenvío DIAN [{etiqueta}] terminó con código {resultado.returncode}")
+            exito = resultado.returncode == 0
+            if exito:
+                logger.info(f"Reenvío DIAN [{etiqueta}] cliente={cli_label} completado.")
+            else:
+                logger.error(f"Reenvío DIAN [{etiqueta}] cliente={cli_label} terminó con código {resultado.returncode}")
 
-    _acumular_resultado_dian(resultado, exito, tipo_doc=tipo_doc, etiqueta=etiqueta)
+            _acumular_resultado_dian(resultado, exito, tipo_doc=tipo, etiqueta=etiqueta)
+            resultados.append({
+                "tipo":       tipo,
+                "key_cli":    cli_label,
+                "returncode": resultado.returncode,
+                "stdout":     resultado.stdout[-3000:],
+                "stderr":     resultado.stderr[-1000:],
+            })
 
-    return {
-        "returncode": resultado.returncode,
-        "stdout":     resultado.stdout[-3000:],
-        "stderr":     resultado.stderr[-1000:],
-    }
+    return resultados if len(resultados) > 1 else resultados[0]
 
 
 @celery_app.task(name="tasks.reenvio_dian.enviar_reporte_dian_diario")
@@ -415,18 +476,26 @@ def enviar_reporte_dian_diario(destinatarios: list = None, **_):
 @celery_app.task(name="tasks.reenvio_dian.reenviar_facturas_dian")
 def reenviar_facturas_dian(
     tipo_doc: str = "facturas",
+    tipos_doc: list = None,
     key_cli: str = None,
+    key_clis: list = None,
     env_config: dict = None,
     **_,
 ):
     """
-    Alias compatible con la DB.  Por defecto procesa facturas; acepta tipo_doc
-    para procesar cualquier tipo soportado ("facturas", "notas_credito",
-    "documentos_soporte").
+    Alias compatible con la DB.  Por defecto procesa facturas.
+
+    kwargs aceptados:
+        tipos_doc — lista de tipos: ["facturas", "notas_credito"], etc.
+        tipo_doc  — tipo único (retrocompatibilidad, default "facturas").
+        key_clis  — lista de clientes: ["abc123", "def456"].
+        key_cli   — cliente único (retrocompatibilidad).
     """
     return reenviar_documentos_dian(
         tipo_doc=tipo_doc,
+        tipos_doc=tipos_doc,
         key_cli=key_cli,
+        key_clis=key_clis,
         env_config=env_config,
     )
 
