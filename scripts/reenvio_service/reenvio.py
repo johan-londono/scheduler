@@ -13,6 +13,8 @@ import asyncpg
 import httpx
 import json
 import base64
+import sys
+import traceback
 from datetime import datetime
 
 from reenvio_service.config import MAX_INTENTOS, API_PYTHON_URL
@@ -236,8 +238,13 @@ async def _procesar_cliente(cliente: dict, token: str, central_pool: asyncpg.Poo
                         fallidas_detalle=fallidas_detalle)
 
     except (asyncpg.PostgresError, OSError) as exc:
-        return _summary(key_cli, nombre, total=0,
-                        connection_error=str(exc))
+        print(f"[ERROR] Conexión DB — {nombre} ({key_cli}): {exc}", file=sys.stderr)
+        return _summary(key_cli, nombre, total=0, connection_error=str(exc))
+
+    except Exception as exc:
+        print(f"[ERROR] Excepción inesperada en facturas — {nombre} ({key_cli}):", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return _summary(key_cli, nombre, total=0, connection_error=f"excepcion: {exc}")
 
     finally:
         if pool:

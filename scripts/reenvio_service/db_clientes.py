@@ -5,7 +5,22 @@ import asyncpg
 from reenvio_service.config import (
     MAIN_DB_HOST, MAIN_DB_NAME, MAIN_DB_USER,
     MAIN_DB_PASSWORD, MAIN_DB_PORT,
+    SCHEDULER_DB_HOST, SCHEDULER_DB_NAME, SCHEDULER_DB_USER,
+    SCHEDULER_DB_PASSWORD, SCHEDULER_DB_PORT,
 )
+
+
+async def create_scheduler_pool() -> asyncpg.Pool:
+    """Pool hacia la DB del scheduler (tablas de errores de reenvío DIAN)."""
+    return await asyncpg.create_pool(
+        host=SCHEDULER_DB_HOST,
+        database=SCHEDULER_DB_NAME,
+        user=SCHEDULER_DB_USER,
+        password=SCHEDULER_DB_PASSWORD,
+        port=SCHEDULER_DB_PORT,
+        min_size=1,
+        max_size=3,
+    )
 
 
 async def create_main_pool() -> asyncpg.Pool:

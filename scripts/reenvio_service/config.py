@@ -1,11 +1,13 @@
 """
 Configuración del servicio de reenvío automático.
-Las variables se inyectan desde scheduler_credentials via env_config.
+Las variables de DB principal son requeridas y deben inyectarse desde
+scheduler_credentials vía env_config (la tarea Celery las pone en os.environ
+antes de lanzar el subprocess). Las vars SCHEDULER_DB_* ya están en el
+entorno del worker y se heredan automáticamente.
 """
 import os
 
-# Conexión a la DB principal de esuite (donde están registrados los clientes)
-# Todas estas variables deben estar configuradas en scheduler_credentials
+# Requeridas — deben venir de scheduler_credentials vía env_config
 MAIN_DB_HOST     = os.environ['MAIN_DB_HOST']
 MAIN_DB_NAME     = os.environ['MAIN_DB_NAME']
 MAIN_DB_USER     = os.environ['MAIN_DB_USER']
@@ -16,6 +18,14 @@ MAIN_DB_PORT     = int(os.environ['MAIN_DB_PORT'])
 API_PYTHON_URL      = os.environ['API_PYTHON_URL'].rstrip('/')
 API_PYTHON_USERNAME = os.environ['API_PYTHON_USERNAME']
 API_PYTHON_PASSWORD = os.environ['API_PYTHON_PASSWORD']
+
+# Scheduler DB — ya en el entorno del worker; fallback a MAIN_DB si coincide
+SCHEDULER_DB_HOST     = os.getenv('SCHEDULER_DB_HOST',     MAIN_DB_HOST)
+SCHEDULER_DB_NAME     = os.getenv('SCHEDULER_DB_DATABASE', 'programadador_tareas')
+SCHEDULER_DB_USER     = os.getenv('SCHEDULER_DB_USER',     MAIN_DB_USER)
+SCHEDULER_DB_PASSWORD = os.getenv('SCHEDULER_DB_PASSWORD', MAIN_DB_PASSWORD)
+SCHEDULER_DB_PORT     = int(os.getenv('SCHEDULER_DB_PORT', str(MAIN_DB_PORT)))
+
 
 # Proveedor de integración DIAN
 PROVEEDOR_INTEGRACION = os.getenv('PROVEEDOR_INTEGRACION', 'AVIA')

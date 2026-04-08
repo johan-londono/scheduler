@@ -7,8 +7,8 @@ de soporte pendientes de aceptación por la DIAN.
 
 Arquitectura
 ------------
-El scheduler invoca como subprocess el módulo ``reenvio_service.main`` del
-proyecto ``esuite_dian_app_v2``, pasando ``--tipo`` para seleccionar el tipo
+El scheduler invoca como subprocess el módulo ``reenvio_service.main`` de
+``scripts/``, pasando ``--tipo`` para seleccionar el tipo
 de documento.  El script procesa todos los clientes con ``transmitir=true``
 (o solo el indicado en ``key_cli``) y emite al final de su stdout la línea::
 
@@ -45,7 +45,7 @@ Extender con un nuevo tipo
 --------------------------
 1. Agregar la entrada en ``_TIPOS_CLI_DIAN`` (clave → argumento ``--tipo``).
 2. Agregar la etiqueta legible en ``_ETIQUETAS_DIAN``.
-3. Asegurarse de que ``esuite_dian_app_v2/reenvio_service/main.py`` acepte
+3. Asegurarse de que ``scripts/reenvio_service/main.py`` acepte
    el nuevo valor en su lista ``TIPOS_VALIDOS``.
 4. Crear la entrada en la DB vía ``POST /tasks`` con el nuevo ``tipo_doc``.
 """
@@ -62,13 +62,13 @@ logger = logging.getLogger(__name__)
 
 # ── Zona horaria y Redis ──────────────────────────────────────────────────────
 
-_TZ               = ZoneInfo("America/Mexico_City")
+_TZ               = ZoneInfo("America/Bogota")
 _REDIS_KEY_PREFIX = "dian:reporte"
 _REDIS_TTL        = 60 * 60 * 48   # 48 horas
 
-# Directorio raíz de esuite_dian_app_v2 (donde corre reenvio_service.main)
+# Directorio scripts/ de este proyecto (cwd para correr reenvio_service.main)
 _SCRIPTS_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), '..', '..', 'esuite_dian_app_v2')
+    os.path.join(os.path.dirname(__file__), '..', 'scripts')
 )
 
 # Argumento --tipo que acepta reenvio_service.main para cada tipo de documento
@@ -171,10 +171,11 @@ def _ejecutar_reenvio(tipo_doc: str, key_cli: str, env_subprocess: dict) -> subp
             f"Opciones: {list(_TIPOS_CLI_DIAN)}"
         )
 
-    # Preferir el venv de esuite_dian_app_v2; si no existe, usar python del sistema
+    # Preferir el venv del scheduler; si no existe, usar python del sistema
+    _base = os.path.join(os.path.dirname(__file__), '..')
     for candidato in (
-        os.path.join(_SCRIPTS_DIR, "venv", "bin", "python3"),
-        os.path.join(_SCRIPTS_DIR, ".venv", "bin", "python3"),
+        os.path.join(_base, "venv", "bin", "python3"),
+        os.path.join(_base, ".venv", "bin", "python3"),
         "/usr/bin/python3",
     ):
         if os.path.isfile(candidato):

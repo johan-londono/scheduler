@@ -1,5 +1,10 @@
 """
-Servicio externo de reenvío automático de facturas a la DIAN.
+Servicio externo de reenvío automático de documentos electrónicos a la DIAN.
+
+Tipos de documento procesados:
+  - Facturas electrónicas    (FE)
+  - Documentos soporte       (DS)
+  - Notas crédito            (NC)
 
 Uso:
     # Procesar todos los clientes con transmitir=true
@@ -7,52 +12,84 @@ Uso:
 
     # Procesar solo un cliente específico
     python -m reenvio_service.main --key-cli <KEY_CLI>
+
+    # Procesar solo un tipo de documento
+    python -m reenvio_service.main --tipo facturas
+    python -m reenvio_service.main --tipo docsoporte
+    python -m reenvio_service.main --tipo nc
+
+Cron (ejemplo: cada hora):
+    0 * * * * cd /ruta/al/proyecto && python -m reenvio_service.main >> /var/log/reenvio_dian.log 2>&1
 """
 import asyncio
 import argparse
-import json
-import os
+import sys
+import traceback
 from datetime import datetime
 
 from reenvio_service.config import (
-    KEY_CLI_FILTER,
-    API_PYTHON_URL,
-    API_PYTHON_USERNAME,
-    API_PYTHON_PASSWORD,
+    PROVEEDOR_INTEGRACION, KEY_CLI_FILTER,
+    API_PYTHON_USERNAME, API_PYTHON_PASSWORD,
 )
-from reenvio_service.db_clientes import create_main_pool, get_all_clientes, get_cliente_by_key
-from reenvio_service.error_log import ensure_error_table
+from reenvio_service.db_clientes import create_main_pool, create_scheduler_pool, get_all_clientes, get_cliente_by_key
 from reenvio_service.reenvio import reenviar_cliente, obtener_token
+from reenvio_service.reenvio_docsoporte import reenviar_cliente_docsoporte
+from reenvio_service.reenvio_nc import reenviar_cliente_nc
 
 SEP = '=' * 70
 
+TIPOS_VALIDOS = ('facturas', 'docsoporte', 'nc')
 
-async def main(key_cli_filter: str = None) -> None:
+
+def _print_resultado(label: str, resultado: dict) -> None:
+    if resultado.get('connection_error'):
+        print(f"  [X] {label} - Error de conexión: {resultado['connection_error']}")
+    elif resultado['total'] == 0:
+        print(f"  [=] {label} - Sin documentos pendientes")
+    else:
+        print(
+            f"  [R] {label} - Total={resultado['total']} | "
+            f"OK={resultado['exitosas']} | "
+            f"Fail={resultado['fallidas']} | "
+            f"Omitidas={resultado['omitidas']}"
+        )
+
+
+async def main(key_cli_filter: str = None, tipo: str = None) -> None:
     inicio = datetime.now()
     print(f"\n{SEP}")
     print(f"  REENVIO AUTOMATICO DIAN  |  {inicio.strftime('%Y-%m-%d %H:%M:%S')}")
+    if tipo:
+        print(f"  Tipo de documento        : {tipo.upper()}")
     print(SEP)
 
-    # 1. Validar configuración de la API
-    if not API_PYTHON_URL:
-        print("[ERROR] API_PYTHON_URL no está configurada. Verifica las credenciales en scheduler_credentials.")
+    # 1. Autenticar contra la API y obtener token
+    print(f"[AUTH] proveedor={PROVEEDOR_INTEGRACION} | Obteniendo token...")
+    try:
+        token = await obtener_token(API_PYTHON_USERNAME, API_PYTHON_PASSWORD)
+    except Exception:
+        print("[AUTH] Error al obtener token:", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return
-    if not API_PYTHON_USERNAME or not API_PYTHON_PASSWORD:
-        print("[ERROR] API_PYTHON_USERNAME o API_PYTHON_PASSWORD no están configuradas.")
-        return
-    print(f"[AUTH] URL={API_PYTHON_URL} | user={API_PYTHON_USERNAME}")
-
-    # 2. Autenticar contra la API y obtener token
-    print("[AUTH] Obteniendo token...")
-    token = await obtener_token(API_PYTHON_USERNAME, API_PYTHON_PASSWORD)
     print("[AUTH] Token obtenido\n")
 
-    # 2. Obtener clientes y preparar tabla de errores en DB central
-    main_pool = await create_main_pool()
+    # 2. Obtener clientes y abrir pool del scheduler (tablas de errores DIAN)
     try:
-        async with main_pool.acquire() as conn:
-            await ensure_error_table(conn)
+        main_pool = await create_main_pool()
+    except Exception:
+        print("[DB] Error al conectar a la DB principal (MAIN_DB_*):", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return
 
+    try:
+        scheduler_pool = await create_scheduler_pool()
+    except Exception:
+        await main_pool.close()
+        print("[DB] Error al conectar a la DB del scheduler (SCHEDULER_DB_*):", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return
+
+    try:
         filtro = key_cli_filter or KEY_CLI_FILTER
 
         if filtro:
@@ -63,83 +100,119 @@ async def main(key_cli_filter: str = None) -> None:
             clientes = [cliente]
         else:
             clientes = await get_all_clientes(main_pool)
-
-        if not clientes:
-            print("[INFO] No hay clientes con transmitir=true. Nada que procesar.")
-            return
-
-        print(f"[INFO] Clientes a procesar: {len(clientes)}\n")
-
-        # 3. Procesar cada cliente
-        resultados = []
-        for i, cliente in enumerate(clientes, 1):
-            modo = 'PROD' if cliente['produccion'] else 'TEST'
-            print(f"[{i}/{len(clientes)}] {cliente['nombre_cliente']} ({cliente['key_cli']}) | {modo}")
-
-            resultado = await reenviar_cliente(cliente, token, main_pool)
-            resultados.append(resultado)
-
-            if resultado.get('connection_error'):
-                print(f"  [X] Error de conexión: {resultado['connection_error']}")
-            elif resultado['total'] == 0:
-                print(f"  [=] Sin facturas pendientes")
-            else:
-                print(
-                    f"  [R] Total={resultado['total']} | "
-                    f"OK={resultado['exitosas']} | "
-                    f"Fail={resultado['fallidas']} | "
-                    f"Omitidas={resultado['omitidas']}"
-                )
-
     finally:
         await main_pool.close()
 
+    if not clientes:
+        print("[INFO] No hay clientes con transmitir=true. Nada que procesar.")
+        await scheduler_pool.close()
+        return
+
+    print(f"[INFO] Clientes a procesar: {len(clientes)}\n")
+
+    procesar_facturas   = tipo is None or tipo == 'facturas'
+    procesar_docsoporte = tipo is None or tipo == 'docsoporte'
+    procesar_nc         = tipo is None or tipo == 'nc'
+
+    # 3. Procesar cada cliente
+    res_facturas   = []
+    res_docsoporte = []
+    res_nc         = []
+
+    try:
+        for i, cliente in enumerate(clientes, 1):
+            modo    = 'PROD' if cliente['produccion'] else 'TEST'
+            key_cli = cliente['key_cli']
+            nombre  = cliente['nombre_cliente']
+            print(f"[{i}/{len(clientes)}] {nombre} ({key_cli}) | {modo}")
+
+            if procesar_facturas:
+                try:
+                    r = await reenviar_cliente(cliente, token, scheduler_pool)
+                except Exception:
+                    print(f"  [FATAL] Facturas — {nombre} ({key_cli}):", file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
+                    r = {'key_cli': key_cli, 'nombre': nombre, 'total': 0,
+                         'exitosas': 0, 'fallidas': 0, 'omitidas': 0,
+                         'connection_error': 'excepcion_no_controlada'}
+                res_facturas.append(r)
+                _print_resultado("Facturas", r)
+
+            if procesar_docsoporte:
+                try:
+                    r = await reenviar_cliente_docsoporte(cliente, token, scheduler_pool)
+                except Exception:
+                    print(f"  [FATAL] DocSoporte — {nombre} ({key_cli}):", file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
+                    r = {'key_cli': key_cli, 'nombre': nombre, 'total': 0,
+                         'exitosas': 0, 'fallidas': 0, 'omitidas': 0,
+                         'connection_error': 'excepcion_no_controlada'}
+                res_docsoporte.append(r)
+                _print_resultado("DocSoporte", r)
+
+            if procesar_nc:
+                try:
+                    r = await reenviar_cliente_nc(cliente, token, scheduler_pool)
+                except Exception:
+                    print(f"  [FATAL] NC — {nombre} ({key_cli}):", file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
+                    r = {'key_cli': key_cli, 'nombre': nombre, 'total': 0,
+                         'exitosas': 0, 'fallidas': 0, 'omitidas': 0,
+                         'connection_error': 'excepcion_no_controlada'}
+                res_nc.append(r)
+                _print_resultado("NC", r)
+    finally:
+        await scheduler_pool.close()
+
     # 4. Resumen final
-    duracion       = (datetime.now() - inicio).total_seconds()
-    total_facturas = sum(r['total']    for r in resultados)
-    total_ok       = sum(r['exitosas'] for r in resultados)
-    total_fail     = sum(r['fallidas'] for r in resultados)
-    con_errores_cx = sum(1 for r in resultados if r.get('connection_error'))
+    duracion = (datetime.now() - inicio).total_seconds()
 
     print(f"\n{SEP}")
     print(f"  RESUMEN FINAL")
     print(SEP)
-    print(f"  Clientes procesados  : {len(resultados)}")
-    if con_errores_cx:
-        print(f"  Errores de conexión  : {con_errores_cx}")
-    print(f"  Facturas procesadas  : {total_facturas}")
-    print(f"  Exitosas             : {total_ok}")
-    print(f"  Fallidas             : {total_fail}")
-    print(f"  Duración             : {duracion:.1f}s")
+    print(f"  Clientes procesados  : {len(clientes)}")
 
+    def _totales(resultados: list[dict], label: str) -> None:
+        if not resultados:
+            return
+        total = sum(r['total']    for r in resultados)
+        ok    = sum(r['exitosas'] for r in resultados)
+        fail  = sum(r['fallidas'] for r in resultados)
+        cx_err = sum(1 for r in resultados if r.get('connection_error'))
+        print(f"  {label:<22} Total={total} | OK={ok} | Fail={fail}" +
+              (f" | CxErr={cx_err}" if cx_err else ""))
+
+    _totales(res_facturas,   "Facturas")
+    _totales(res_docsoporte, "Doc. Soporte")
+    _totales(res_nc,         "Notas Crédito")
+
+    print(f"  Duración             : {duracion:.1f}s")
     print(SEP + "\n")
 
     # Línea JSON estructurada para la tarea Celery (correo de notificación)
-    todas_fallidas = [f for r in resultados for f in r.get('fallidas_detalle', [])]
+    import json as _json
+    todas_listas  = res_facturas + res_nc + res_docsoporte
+    todas_fallidas = [f for r in todas_listas for f in r.get('fallidas_detalle', [])]
     errores_conexion = [
-        {
-            "key_cli": r['key_cli'],
-            "cliente": r['nombre'],
-            "error":   r['connection_error'],
-        }
-        for r in resultados if r.get('connection_error')
+        {"key_cli": r['key_cli'], "cliente": r['nombre'], "error": r['connection_error']}
+        for r in todas_listas if r.get('connection_error')
     ]
     resumen_json = {
-        "clientes":          len(resultados),
-        "facturas":          total_facturas,
-        "exitosas":          total_ok,
-        "fallidas":          total_fail,
-        "errores_cx":        con_errores_cx,
-        "fallidas_detalle":  todas_fallidas,
-        "errores_conexion":  errores_conexion,
-        "nombres_clientes":  [r['nombre'] for r in resultados],
+        "clientes":         len(clientes),
+        "facturas":         sum(r['total']    for r in todas_listas),
+        "exitosas":         sum(r['exitosas'] for r in todas_listas),
+        "fallidas":         sum(r['fallidas'] for r in todas_listas),
+        "errores_cx":       len({r['key_cli'] for r in todas_listas if r.get('connection_error')}),
+        "fallidas_detalle": todas_fallidas,
+        "errores_conexion": errores_conexion,
+        "nombres_clientes": [c['nombre_cliente'] for c in clientes],
     }
-    print(f"RESUMEN_JSON:{json.dumps(resumen_json, ensure_ascii=False)}")
+    print(f"RESUMEN_JSON:{_json.dumps(resumen_json, ensure_ascii=False)}")
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='Reenvío automático de facturas a la DIAN (máx. 3 intentos por factura)'
+        description='Reenvío automático de documentos electrónicos a la DIAN'
     )
     parser.add_argument(
         '--key-cli',
@@ -147,5 +220,12 @@ if __name__ == '__main__':
         default=None,
         help='Procesar solo este cliente (key_cli). Sin valor = todos los clientes.',
     )
+    parser.add_argument(
+        '--tipo',
+        type=str,
+        choices=TIPOS_VALIDOS,
+        default=None,
+        help='Tipo de documento a procesar: facturas, docsoporte, nc. Sin valor = todos.',
+    )
     args = parser.parse_args()
-    asyncio.run(main(key_cli_filter=args.key_cli))
+    asyncio.run(main(key_cli_filter=args.key_cli, tipo=args.tipo))
