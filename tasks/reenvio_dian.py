@@ -283,11 +283,24 @@ def reenviar_documentos_dian(
     resultados = []
     for cli in clientes:
         for tipo in tipos:
-            etiqueta = _ETIQUETAS_DIAN[tipo]
+            etiqueta  = _ETIQUETAS_DIAN[tipo]
             cli_label = cli or "todos"
             logger.info(f"Procesando [{etiqueta}] cliente={cli_label}")
 
-            resultado = _ejecutar_reenvio(tipo, cli, env_subprocess)
+            try:
+                resultado = _ejecutar_reenvio(tipo, cli, env_subprocess)
+            except Exception as exc:
+                logger.error(
+                    f"Error inesperado al ejecutar reenvío DIAN "
+                    f"[{etiqueta}] cliente={cli_label}: {exc}"
+                )
+                resultados.append({
+                    "tipo":       tipo,
+                    "key_cli":    cli_label,
+                    "returncode": -1,
+                    "error":      str(exc),
+                })
+                continue
 
             if resultado.stdout:
                 for linea in resultado.stdout.splitlines():
@@ -300,7 +313,10 @@ def reenviar_documentos_dian(
             if exito:
                 logger.info(f"Reenvío DIAN [{etiqueta}] cliente={cli_label} completado.")
             else:
-                logger.error(f"Reenvío DIAN [{etiqueta}] cliente={cli_label} terminó con código {resultado.returncode}")
+                logger.error(
+                    f"Reenvío DIAN [{etiqueta}] cliente={cli_label} "
+                    f"terminó con código {resultado.returncode}"
+                )
 
             _acumular_resultado_dian(resultado, exito, tipo_doc=tipo, etiqueta=etiqueta)
             resultados.append({
