@@ -47,3 +47,23 @@ FILTRO_MES   = os.getenv('FILTRO_MES',   '').strip()
 FILTRO_ANIO  = os.getenv('FILTRO_ANIO',  '').strip()
 FILTRO_DESDE = os.getenv('FILTRO_DESDE', '').strip()
 FILTRO_HASTA = os.getenv('FILTRO_HASTA', '').strip()
+
+
+def filtro_fecha_sql(col: str) -> str:
+    """
+    Retorna la cláusula AND de fecha según los FILTRO_* activos.
+    Sin ningún filtro configurado aplica el mes actual por defecto.
+
+    Valores vienen de variables de entorno (no de input de usuario),
+    por lo que es seguro embeberloss directamente en el SQL.
+    """
+    if FILTRO_DIA:
+        return f"AND DATE({col}) = '{FILTRO_DIA}'"
+    if FILTRO_MES:
+        return f"AND TO_CHAR({col}, 'YYYY-MM') = '{FILTRO_MES}'"
+    if FILTRO_ANIO:
+        return f"AND EXTRACT(YEAR FROM {col}) = {int(FILTRO_ANIO)}"
+    if FILTRO_DESDE and FILTRO_HASTA:
+        return f"AND DATE({col}) BETWEEN '{FILTRO_DESDE}' AND '{FILTRO_HASTA}'"
+    # Default: mes en curso
+    return f"AND DATE_TRUNC('month', {col}) = DATE_TRUNC('month', CURRENT_DATE)"

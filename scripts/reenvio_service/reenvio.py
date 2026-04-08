@@ -17,7 +17,7 @@ import sys
 import traceback
 from datetime import datetime
 
-from reenvio_service.config import MAX_INTENTOS, API_PYTHON_URL
+from reenvio_service.config import MAX_INTENTOS, API_PYTHON_URL, filtro_fecha_sql
 from reenvio_service.error_log import insert_error
 
 # Locks por cliente para evitar doble-incremento de diannumeroenvios
@@ -29,7 +29,9 @@ _CHECK_PREFIJO_COL = """
     WHERE  table_name = 'facturas' AND column_name = 'prefijo'
 """
 
-_QUERY_PENDIENTES_DIRECTO = """
+_FILTRO_FECHA = filtro_fecha_sql("f.created_at")
+
+_QUERY_PENDIENTES_DIRECTO = f"""
     SELECT f.id,
            f.prefijo,
            f.consecutivo,
@@ -38,11 +40,12 @@ _QUERY_PENDIENTES_DIRECTO = """
     WHERE  f.modalidadpago_id = 2
       AND  f.diancufe IS NULL
       AND  COALESCE(f.diannumeroenvios, 0) < $1
-      AND f.estado_id = 1
+      AND  f.estado_id = 1
+      {_FILTRO_FECHA}
     ORDER  BY f.created_at ASC
 """
 
-_QUERY_PENDIENTES_JOIN = """
+_QUERY_PENDIENTES_JOIN = f"""
     SELECT f.id,
            csf.prefijo,
            f.consecutivo,
@@ -51,8 +54,9 @@ _QUERY_PENDIENTES_JOIN = """
     JOIN   clienteserialfacturas csf ON f.clienteserialfactura_id = csf.id
     WHERE  f.modalidadpago_id = 2
       AND  f.diancufe IS NULL
-      AND f.estado_id = 1
+      AND  f.estado_id = 1
       AND  COALESCE(f.diannumeroenvios, 0) < $1
+      {_FILTRO_FECHA}
     ORDER  BY f.created_at ASC
 """
 

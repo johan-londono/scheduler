@@ -15,7 +15,7 @@ import json
 import sys
 import traceback
 
-from reenvio_service.config import MAX_INTENTOS, API_PYTHON_URL
+from reenvio_service.config import MAX_INTENTOS, API_PYTHON_URL, filtro_fecha_sql
 from reenvio_service.error_log import (
     ensure_docsoporte_error_table,
     insert_docsoporte_error,
@@ -24,7 +24,7 @@ from reenvio_service.error_log import (
 
 _client_locks: dict[str, asyncio.Lock] = {}
 
-_QUERY_PENDIENTES = """
+_QUERY_PENDIENTES = f"""
     SELECT cd.id,
            csf.prefijo,
            cd.consecutivoresolucion::text AS consecutivo
@@ -33,6 +33,7 @@ _QUERY_PENDIENTES = """
     WHERE  cd.clienteserialfacturas_id > 0
       AND  (cd.dianenviado IS NULL OR cd.dianenviado = false)
       AND  cd.diancufe IS NULL
+      {filtro_fecha_sql("cd.created_at")}
     ORDER  BY cd.created_at ASC
 """
 
@@ -40,9 +41,9 @@ _QUERY_PENDIENTES = """
 async def llamar_getcuds(token: str, key_cli: str, consecutivo: str, prefijo: str) -> dict:
     """Llama a GET /api/v1/docsoporte/getcuds/{data_b64} y retorna el resultado."""
     payload = json.dumps({
-        "key_cli":    key_cli,
-        "consecutivo": consecutivo,
-        "prefijo":    str(prefijo),
+        "key_cli":                key_cli,
+        "consecutivo_docsoporte": consecutivo,
+        "prefijo_docsoporte":     str(prefijo),
     })
     data_b64 = base64.urlsafe_b64encode(payload.encode()).decode()
 

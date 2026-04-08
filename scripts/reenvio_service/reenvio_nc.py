@@ -21,7 +21,7 @@ import json
 import sys
 import traceback
 
-from reenvio_service.config import MAX_INTENTOS, API_PYTHON_URL
+from reenvio_service.config import MAX_INTENTOS, API_PYTHON_URL, filtro_fecha_sql
 from reenvio_service.error_log import ensure_nc_error_table, insert_nc_error
 
 _client_locks: dict[str, asyncio.Lock] = {}
@@ -29,10 +29,10 @@ _client_locks: dict[str, asyncio.Lock] = {}
 # tipodocumentointerno_id = 3 → Nota Crédito electrónica
 # Prefijo obtenido via clienteserialfactura_id → clienteserialfacturas.prefijo
 # Búsqueda en getnotacredito siempre por nc.id
-_QUERY_PENDIENTES = """
+_QUERY_PENDIENTES = f"""
     SELECT nc.id,
-           COALESCE(nc.diannumeroenvios, 0)    AS intentos_previos,
-           nc.consecutivo,
+           COALESCE(nc.diannumeroenvios, 0) AS intentos_previos,
+           COALESCE(nc.consecutivo, nc.id) AS consecutivo,
            csf.prefijo,
            nc.numerodocumento
     FROM   contablenotascreditos nc
@@ -40,6 +40,23 @@ _QUERY_PENDIENTES = """
     WHERE  nc.tipodocumentointerno_id = 3
       AND  nc.diancufe IS NULL
       AND  COALESCE(nc.diannumeroenvios, 0) < $1
+      {filtro_fecha_sql("nc.created_at")}
+    ORDER  BY nc.created_at ASC
+"""
+
+# Fallback para clientes cuya tabla no tiene la columna consecutivo
+_QUERY_PENDIENTES_SIN_CONSECUTIVO = f"""
+    SELECT nc.id,
+           COALESCE(nc.diannumeroenvios, 0) AS intentos_previos,
+           nc.id                            AS consecutivo,
+           csf.prefijo,
+           nc.numerodocumento
+    FROM   contablenotascreditos nc
+    LEFT   JOIN clienteserialfacturas csf ON nc.clienteserialfactura_id = csf.id
+    WHERE  nc.tipodocumentointerno_id = 3
+      AND  nc.diancufe IS NULL
+      AND  COALESCE(nc.diannumeroenvios, 0) < $1
+      {filtro_fecha_sql("nc.created_at")}
     ORDER  BY nc.created_at ASC
 """
 
@@ -126,7 +143,10 @@ async def _procesar_cliente(
         )
 
         async with pool.acquire() as conn:
-            ncs = await conn.fetch(_QUERY_PENDIENTES, MAX_INTENTOS)
+            try:
+                ncs = await conn.fetch(_QUERY_PENDIENTES, MAX_INTENTOS)
+            except asyncpg.exceptions.UndefinedColumnError:
+                ncs = await conn.fetch(_QUERY_PENDIENTES_SIN_CONSECUTIVO, MAX_INTENTOS)
 
         async with scheduler_pool.acquire() as conn:
             await ensure_nc_error_table(conn)

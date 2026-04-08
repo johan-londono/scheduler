@@ -394,10 +394,19 @@ def enviar_reporte_dian_diario(destinatarios: list = None, **_):
 # ── Alias para compatibilidad con entradas existentes en la DB ────────────────
 
 @celery_app.task(name="tasks.reenvio_dian.reenviar_facturas_dian")
-def reenviar_facturas_dian(key_cli: str = None, env_config: dict = None, **_):
-    """Alias de reenviar_documentos_dian con tipo_doc='facturas'."""
+def reenviar_facturas_dian(
+    tipo_doc: str = "facturas",
+    key_cli: str = None,
+    env_config: dict = None,
+    **_,
+):
+    """
+    Alias compatible con la DB.  Por defecto procesa facturas; acepta tipo_doc
+    para procesar cualquier tipo soportado ("facturas", "notas_credito",
+    "documentos_soporte").
+    """
     return reenviar_documentos_dian(
-        tipo_doc="facturas",
+        tipo_doc=tipo_doc,
         key_cli=key_cli,
         env_config=env_config,
     )
