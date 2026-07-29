@@ -5,9 +5,14 @@ import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.deps import get_db, require_role
+from api.deps import enmascarar, get_db, require_role
 
 router = APIRouter()
+
+
+def _sin_secretos(row) -> dict:
+    """Enmascara los kwargs de una tarea (pueden traer access keys, passwords, etc)."""
+    return {**row, "kwargs": enmascarar(dict(row["kwargs"] or {}))}
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -53,7 +58,7 @@ def list_tasks(conn=Depends(get_db), _=Depends(require_role("viewer"))):
             LEFT JOIN scheduler_credentials c ON c.id = t.credentials_id
             ORDER BY t.id
         """)
-        return cur.fetchall()
+        return [_sin_secretos(row) for row in cur.fetchall()]
 
 
 @router.post("", status_code=201)
@@ -74,7 +79,7 @@ def create_task(body: TaskCreate, conn=Depends(get_db), _=Depends(require_role("
                 body.credentials_id, body.activa,
             ))
             conn.commit()
-            return cur.fetchone()
+            return _sin_secretos(cur.fetchone())
         except Exception as e:
             conn.rollback()
             raise HTTPException(status_code=400, detail=str(e))
@@ -106,7 +111,7 @@ def update_task(name: str, body: TaskPatch, conn=Depends(get_db), _=Depends(requ
             conn.rollback()
             raise HTTPException(status_code=404, detail=f"Tarea '{name}' no encontrada.")
         conn.commit()
-        return row
+        return _sin_secretos(row)
 
 
 @router.delete("/{name}", status_code=204)

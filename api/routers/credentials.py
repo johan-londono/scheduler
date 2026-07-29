@@ -4,19 +4,9 @@ import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.deps import get_db, require_role
+from api.deps import enmascarar, get_db, require_role
 
 router = APIRouter()
-
-_SENSITIVE_KEYS = ("password", "secret", "key", "token")
-
-
-def _mask(env_vars: dict) -> dict:
-    """Oculta valores cuya clave contenga terminos sensibles."""
-    return {
-        k: "***" if any(s in k.lower() for s in _SENSITIVE_KEYS) else v
-        for k, v in env_vars.items()
-    }
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -47,7 +37,7 @@ def list_credentials(conn=Depends(get_db), _=Depends(require_role("viewer"))):
         rows = cur.fetchall()
 
     return [
-        {**row, "env_vars": _mask(dict(row["env_vars"] or {}))}
+        {**row, "env_vars": enmascarar(dict(row["env_vars"] or {}))}
         for row in rows
     ]
 
@@ -63,7 +53,7 @@ def create_credential(body: CredentialCreate, conn=Depends(get_db), _=Depends(re
             )
             conn.commit()
             row = cur.fetchone()
-            return {"id": row["id"], "name": row["name"], "env_vars": _mask(body.env_vars)}
+            return {"id": row["id"], "name": row["name"], "env_vars": enmascarar(body.env_vars)}
         except Exception as e:
             conn.rollback()
             raise HTTPException(status_code=400, detail=str(e))
@@ -82,7 +72,7 @@ def update_credential(credential_id: int, body: CredentialPatch, conn=Depends(ge
             conn.rollback()
             raise HTTPException(status_code=404, detail=f"Credencial id={credential_id} no encontrada.")
         conn.commit()
-        return {**row, "env_vars": _mask(dict(row["env_vars"]))}
+        return {**row, "env_vars": enmascarar(dict(row["env_vars"]))}
 
 
 @router.delete("/{credential_id}", status_code=204)

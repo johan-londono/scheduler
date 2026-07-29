@@ -10,6 +10,25 @@ from db import obtener_conexion
 
 _bearer = HTTPBearer()
 
+_TERMINOS_SENSIBLES = ("password", "secret", "token")
+
+
+def enmascarar(datos: dict) -> dict:
+    """Oculta valores cuya clave sea sensible, recursivamente.
+
+    Sensible = contiene password/secret/token, o termina en "key".
+    El sufijo evita pisar identificadores legitimos como key_cli / key_clis.
+    """
+    return {
+        k: "***" if _es_sensible(k) else enmascarar(v) if isinstance(v, dict) else v
+        for k, v in datos.items()
+    }
+
+
+def _es_sensible(clave: str) -> bool:
+    c = clave.lower()
+    return c.endswith("key") or any(t in c for t in _TERMINOS_SENSIBLES)
+
 
 def get_db():
     """Dependency de FastAPI: abre una conexión por request y la cierra al terminar."""
