@@ -167,15 +167,8 @@ POST http://localhost:8080/tasks
   "kwargs": {}, "hour": "17", "minute": "0" }
 ```
 
-Después de crear las tareas, reiniciar los servicios:
-
-```bash
-# Vía API
-POST http://localhost:8080/system/restart
-
-# Vía CLI
-bash scripts/reiniciar.sh
-```
+Beat recarga la DB cada 60s, así que las tareas nuevas arrancan solas.
+Solo hace falta `sudo bash scripts/reiniciar.sh` si se cambió código Python.
 
 ---
 

@@ -19,14 +19,16 @@ Celery Beat             → encola tareas en Redis segun cron
     ↓
 Celery Worker           → ejecuta la funcion Python de la tarea
     ↓
-subprocess              → siigo_script.py / dominus_script.py
+scripts/                → sync_siigo.run_sync() in-process (Siigo)
+                          subprocess → dominus_script.py, reenvio_service (resto)
 ```
 
-- **app.py** — Crea `celery_app`, lee `scheduler_tasks` via `db.obtener_tareas_activas()` e importa todos los modulos de `tasks/` para registrar las funciones en el worker. **Se lee solo al arrancar** — cambios en DB requieren reiniciar.
+- **app.py** — Crea `celery_app`, lee `scheduler_tasks` via `db.obtener_tareas_activas()` e importa todos los modulos de `tasks/` para registrar las funciones en el worker.
+- **beat_scheduler.py** — Scheduler custom de Beat (`--scheduler=beat_scheduler:SchedulerDB`) que relee la DB cada 60s. Crear/editar/desactivar tareas cuya funcion ya existe **no requiere reiniciar**. Codigo Python nuevo si requiere reiniciar el worker.
 - **db.py** — Conexion a PostgreSQL del scheduler (`SCHEDULER_DB_*`). `obtener_tareas_activas()` hace JOIN con `scheduler_credentials` y expone `env_vars` como `env_config`.
 - **api/** — FastAPI app. Gestiona las tablas desde HTTP. Ver endpoints abajo.
 - **tasks/** — Funciones Python decoradas con `@celery_app.task`. Cada una acepta `env_config` (dict de vars de entorno) que se inyecta al subprocess.
-- **scripts/** — Scripts invocados via `subprocess.run()` desde las tareas.
+- **scripts/** — Scripts invocados via `subprocess.run()` desde las tareas. Excepcion: `sync_siigo.py` se importa y se llama con `asyncio.run(run_sync(...))`, sin subprocess.
 
 ## Agregar una tarea nueva
 
@@ -64,7 +66,6 @@ Corre en el puerto **8080**. Documentacion interactiva en `/docs`.
 | PATCH | `/credentials/{id}` | Fusiona vars (no reemplaza el set completo) |
 | DELETE | `/credentials/{id}` | Elimina set |
 | GET | `/system/status` | Tareas activas en DB |
-| POST | `/system/restart` | daemon-reload + restart worker+beat |
 
 ## Esquema de base de datos
 
@@ -105,7 +106,7 @@ CREATE TABLE scheduler_tasks (
 pip install -r requirements.txt
 
 # Celery worker + beat
-celery -A app worker --beat --loglevel=info
+celery -A app worker --beat --loglevel=info --scheduler=beat_scheduler:SchedulerDB
 
 # API FastAPI (puerto 8080, con hot-reload)
 .venv/bin/uvicorn api.main:app --reload --port 8080
@@ -146,12 +147,6 @@ bash scripts/estado.sh
 sudo journalctl -u celery-worker -f
 sudo journalctl -u celery-beat -f
 sudo journalctl -u celery-api -f
-```
-
-Para que `POST /system/restart` funcione, agregar a `/etc/sudoers`:
-```
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl restart celery-worker celery-beat
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl daemon-reload
 ```
 
 ## Convenciones clave

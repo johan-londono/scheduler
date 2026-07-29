@@ -27,7 +27,7 @@ python3 scripts/migrar_db.py
 
 ```bash
 # Celery worker + beat (en un solo proceso)
-celery -A app worker --beat --loglevel=info
+celery -A app worker --beat --loglevel=info --scheduler=beat_scheduler:SchedulerDB
 
 # API REST (puerto 8080, hot-reload)
 .venv/bin/uvicorn api.main:app --reload --port 8080
@@ -50,13 +50,13 @@ POST /tasks
   "credentials_id": 1
 }
 ```
-Luego `POST /system/restart` para que Beat lo tome.
+Beat la toma sola en menos de 60s. No hay que reiniciar nada.
 
 **Caso 2 — función nueva** (lógica que no existe en el código):
 1. Crear `tasks/mi_tarea.py` con `@celery_app.task(name="tasks.mi_tarea.mi_funcion")`
 2. Agregar en `app.py`: `import tasks.mi_tarea  # noqa: F401, E402`
 3. Registrar via `POST /tasks` con `"function": "tasks.mi_tarea.mi_funcion"`
-4. `POST /system/restart`
+4. `sudo bash scripts/reiniciar.sh` en el servidor — el worker necesita cargar el código nuevo
 
 > El campo `function` debe coincidir exactamente con el `name` del decorador `@celery_app.task`.
 > La API controla **cuándo** (schedule/kwargs). El **cómo** (código Python) debe existir primero.
@@ -75,7 +75,6 @@ Luego `POST /system/restart` para que Beat lo tome.
 | PATCH | `/credentials/{id}` | Fusiona vars (rota credenciales sin reescribir todo) |
 | DELETE | `/credentials/{id}` | Elimina set |
 | GET | `/system/status` | Tareas activas en DB |
-| POST | `/system/restart` | daemon-reload + restart worker+beat |
 
 ### Ejemplos frecuentes
 
@@ -140,7 +139,7 @@ curl http://localhost:8080/tasks -H "Authorization: Bearer $TOKEN"
 |-----|--------|
 | `viewer` | GET /tasks, GET /credentials, GET /system/status |
 | `operator` | viewer + POST /tasks/{name}/run |
-| `admin` | todo, incluyendo POST/PATCH/DELETE y POST /system/restart |
+| `admin` | todo, incluyendo POST/PATCH/DELETE |
 
 > La jerarquía es acumulativa: `admin` incluye todo lo de `operator` y `viewer`.
 
@@ -259,12 +258,6 @@ sudo bash scripts/reiniciar.sh
 sudo journalctl -u celery-worker -f
 sudo journalctl -u celery-beat -f
 sudo journalctl -u celery-api -f
-```
-
-Para que `POST /system/restart` funcione, agregar a `/etc/sudoers`:
-```
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl restart celery-worker celery-beat
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl daemon-reload
 ```
 
 ## Variables de entorno (.env)
