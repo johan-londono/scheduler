@@ -42,8 +42,8 @@ def construir_crontab(tarea):
     )
 
 
-def registrar_tareas():
-    """Lee las tareas activas de la base de datos y las registra en beat_schedule."""
+def construir_schedule():
+    """Lee las tareas activas de la DB y retorna el dict de beat_schedule."""
     from db import obtener_tareas_activas
 
     tareas = obtener_tareas_activas()
@@ -70,11 +70,11 @@ def registrar_tareas():
         }
         logger.info(f"Tarea registrada: {nombre} -> {funcion}")
 
-    celery_app.conf.beat_schedule = beat_schedule
+    return beat_schedule
 
 
 # Registrar tareas al importar el módulo
-registrar_tareas()
+celery_app.conf.beat_schedule = construir_schedule()
 
 # Importar módulos de tareas
 import tasks.sincronizar_cliente_siigo  # noqa: F401, E402

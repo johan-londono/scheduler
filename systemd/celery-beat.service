@@ -9,7 +9,7 @@ Group=DEPLOY_GROUP
 
 WorkingDirectory=DEPLOY_PATH
 EnvironmentFile=DEPLOY_PATH/.env
-ExecStart=DEPLOY_PATH/.venv/bin/celery -A app beat --loglevel=info
+ExecStart=DEPLOY_PATH/.venv/bin/celery -A app beat --loglevel=info --scheduler=beat_scheduler:SchedulerDB
 Restart=always
 RestartSec=10
 
