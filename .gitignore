@@ -33,3 +33,6 @@ config/tasks.yaml
 
 # Archivos temporales / colecciones locales
 tmp/
+
+# Tests locales (no se versionan)
+test/
