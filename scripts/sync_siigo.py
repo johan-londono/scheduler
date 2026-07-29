@@ -1,461 +1,403 @@
-#!/usr/bin/env python3
+"""Librería para sincronizar datos desde la API de Siigo.
+
+No es ejecutable: se instancia SiigoSync una vez con la config y las
+credenciales del cliente, y se llama run_sync() por rango/proceso. La config,
+el customer y las credenciales viven en la instancia; ninguna función interna
+las recibe como parámetro.
+
+    from scripts.sync_siigo import Config, SiigoSync
+
+    sync = SiigoSync(
+        customer=23,
+        config=Config(api_url=..., api_user=..., api_password=...),
+        username="usuario@empresa.com",
+        access_key="...",
+    )
+    resultado = await sync.run_sync(
+        date_start="2026-07-01",
+        date_end="2026-07-31",
+        process="customers",   # opcional; None ejecuta todos
+    )
 """
-sync_siigo.py — Script de sincronización de módulos Siigo
 
-Uso básico:
-    python sync_siigo.py --url http://localhost:8000 \
-        --username admin@empresa.com --password mipass --key 123 \
-        --siigo-username usuario@siigo.com --siigo-access-key ACCESS_KEY \
-        --modules invoices customers \
-        --date-start 2025-01-01 --date-end 2025-01-31
-
-Todos los módulos:
-    python sync_siigo.py ... --all
-
-Ver módulos disponibles:
-    python sync_siigo.py --list-modules
-"""
-
-import argparse
-import sys
+import os
+import asyncio
 import json
-import math
-from datetime import datetime
+import logging
+import httpx
+from datetime import datetime, date
+from dotenv import load_dotenv
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
 
-try:
-    import requests
-except ImportError:
-    print("ERROR: requiere 'requests'. Instalar con: pip install requests")
-    sys.exit(1)
+load_dotenv()
+
+# ========== LOGGING ==========
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# ========== CONFIGURACIÓN ==========
+@dataclass
+class Config:
+    api_url: str
+    api_user: str
+    api_password: str
+    workers: int = 10
+    page_size: int = 100
 
 
-# ─────────────────────────────────────────────
-#  Definición de módulos
-# ─────────────────────────────────────────────
+PROCESS = [
+    'products', 'invoices', 'customers', 'accounts-payable',
+    'balance-report', 'balance-report-by-thirdparty', 'purchases',
+    'journals', 'users', 'document-types', 'credit-notes',
+]
 
-# date_fields: qué campos de fecha acepta el módulo
-#   "created"   → created_start / created_end
-#   "date"      → date_start / date_end  (además de created)
-#   "due"       → due_date_start / due_date_end
-#   None        → no acepta fechas
-# has_body: si el endpoint espera form-body con los filtros
-MODULES = {
-    "customers": {
-        "endpoint": "/api/v1/siigo/generate/customers",
-        "date_fields": "created",
-        "has_body": True,
-        "description": "Clientes",
-    },
-    "products": {
-        "endpoint": "/api/v1/siigo/generate/products",
-        "date_fields": "created",
-        "has_body": True,
-        "description": "Productos",
-    },
-    "invoices": {
-        "endpoint": "/api/v1/siigo/generate/invoices",
-        "date_fields": "date+created",
-        "has_body": True,
-        "description": "Facturas de venta",
-    },
-    "credit-notes": {
-        "endpoint": "/api/v1/siigo/generate/credit-notes",
-        "date_fields": "created",
-        "has_body": True,
-        "description": "Notas crédito",
-    },
-    "purchases": {
-        "endpoint": "/api/v1/siigo/generate/purchases",
-        "date_fields": None,
-        "has_body": False,
-        "description": "Compras",
-    },
-    "vouchers": {
-        "endpoint": "/api/v1/siigo/generate/vouchers",
-        "date_fields": "created",
-        "has_body": True,
-        "description": "Comprobantes (vouchers)",
-    },
-    "journals": {
-        "endpoint": "/api/v1/siigo/generate/journals",
-        "date_fields": None,
-        "has_body": False,
-        "description": "Diarios contables",
-    },
-    "accounts-payable": {
-        "endpoint": "/api/v1/siigo/generate/accounts-payable",
-        "date_fields": "due",
-        "has_body": True,
-        "description": "Cuentas por pagar",
-    },
-    "account-groups": {
-        "endpoint": "/api/v1/siigo/generate/account-groups",
-        "date_fields": None,
-        "has_body": True,
-        "description": "Grupos de cuentas",
-    },
-    "cost-centers": {
-        "endpoint": "/api/v1/siigo/generate/cost-centers",
-        "date_fields": None,
-        "has_body": True,
-        "description": "Centros de costo",
-    },
-    "warehouses": {
-        "endpoint": "/api/v1/siigo/generate/warehouses",
-        "date_fields": None,
-        "has_body": True,
-        "description": "Bodegas",
-    },
-    "users": {
-        "endpoint": "/api/v1/siigo/generate/users",
-        "date_fields": None,
-        "has_body": False,
-        "description": "Usuarios Siigo",
-    },
-    "document-types": {
-        "endpoint": "/api/v1/siigo/generate/document-types",
-        "date_fields": None,
-        "has_body": True,
-        "description": "Tipos de documento (requiere --doc-type)",
-    },
-    "balance-report": {
-        "endpoint": "/api/v1/siigo/generate/balance-report",
-        "date_fields": "balance",
-        "has_body": True,
-        "description": "Reporte de balance general (requiere --year y --month o --month-start/--month-end)",
-    },
-    "balance-report-by-thirdparty": {
-        "endpoint": "/api/v1/siigo/generate/balance-report-by-thirdparty",
-        "date_fields": "balance",
-        "has_body": True,
-        "description": "Reporte de balance por tercero (requiere --year y --month o --month-start/--month-end)",
-    },
+PROCESS_DATE_RANGE = {
+    'products': 'created',
+    'invoices': 'created',
+    'customers': 'created',
+    'credit-notes': 'created',
+    'accounts-payable': 'due_date',
 }
 
-ALL_MODULES = list(MODULES.keys())
+# ========== FUNCIONES DE VALIDACIÓN ==========
 
-
-# ─────────────────────────────────────────────
-#  Helpers de output
-# ─────────────────────────────────────────────
-
-def log(msg, level="INFO"):
-    ts = datetime.now().strftime("%H:%M:%S")
-    prefix = {"INFO": "  ", "OK": "✓ ", "ERR": "✗ ", "WARN": "! ", "HEAD": ""}
-    print(f"[{ts}] {prefix.get(level, '')}{msg}")
-
-def section(title):
-    print(f"\n{'─' * 55}")
-    print(f"  {title}")
-    print(f"{'─' * 55}")
-
-
-# ─────────────────────────────────────────────
-#  Autenticación
-# ─────────────────────────────────────────────
-
-def login(base_url, username, password, key):
-    url = f"{base_url}/api/token/"
-    payload = {"username": username, "password": password, "key": key}
-    log(f"Autenticando en ESuite (key={key})...")
-    r = requests.post(url, data=payload, timeout=30)
-    if r.status_code != 200:
-        log(f"Login fallido ({r.status_code}): {r.text}", "ERR")
-        sys.exit(1)
-    token = r.json().get("access_token")
-    if not token:
-        log("Respuesta de login no contiene access_token", "ERR")
-        sys.exit(1)
-    log("Login exitoso", "OK")
-    return token
-
-
-def generate_siigo_token(base_url, jwt, siigo_username, siigo_access_key):
-    url = f"{base_url}/api/v1/siigo/generate/token"
-    headers = {"Authorization": f"Bearer {jwt}"}
-    payload = {"username": siigo_username, "access_key": siigo_access_key}
-    log("Generando token Siigo...")
-    r = requests.post(url, headers=headers, json=payload, timeout=30)
-    body = r.json()
-    if r.status_code != 200:
-        log(f"Error generando token Siigo: {body}", "ERR")
-        sys.exit(1)
-    log(f"{body.get('message', 'Token generado')}", "OK")
-
-
-# ─────────────────────────────────────────────
-#  Construcción del form-body según módulo
-# ─────────────────────────────────────────────
-
-def build_body(module_cfg, args):
-    date_type = module_cfg["date_fields"]
-    body = {}
-
-    if date_type == "created" or date_type == "date+created":
-        if args.date_start:
-            body["created_start"] = args.date_start
-        if args.date_end:
-            body["created_end"] = args.date_end
-
-    if date_type == "date+created":
-        if args.date_start:
-            body["date_start"] = args.date_start
-        if args.date_end:
-            body["date_end"] = args.date_end
-
-    if date_type == "due":
-        if args.date_start:
-            body["due_date_start"] = args.date_start
-        if args.date_end:
-            body["due_date_end"] = args.date_end
-
-    if date_type == "balance":
-        if not args.year:
-            log("balance-report requiere --year", "ERR")
-            return None
-        body["year"] = args.year
-        if args.account_start:
-            body["account_start"] = args.account_start
-        if args.account_end:
-            body["account_end"] = args.account_end
-        if args.month:
-            body["month"] = args.month
-        else:
-            if not (args.month_start and args.month_end):
-                log("balance-report requiere --month o el par --month-start y --month-end", "ERR")
-                return None
-            body["month_start"] = args.month_start
-            body["month_end"] = args.month_end
-        if args.includes_tax_difference is not None:
-            body["includes_tax_difference"] = str(args.includes_tax_difference).lower()
-
-    if module_cfg["endpoint"].endswith("document-types"):
-        if not args.doc_type:
-            log("document-types requiere --doc-type", "ERR")
-            return None
-        body["type"] = args.doc_type
-
-    return body
-
-
-# ─────────────────────────────────────────────
-#  Llamada a un módulo (una página)
-# ─────────────────────────────────────────────
-
-def call_module(base_url, jwt, module_name, module_cfg, args, page, clear_first_page):
-    url = f"{base_url}{module_cfg['endpoint']}"
-    headers = {"Authorization": f"Bearer {jwt}"}
-
-    params = {
-        "page_size": args.page_size,
-        "page": page,
-        "clear": str(clear_first_page).lower(),
-        "clear_tables": "false",
-    }
-
-    body = {}
-    if module_cfg["has_body"]:
-        body = build_body(module_cfg, args)
-        if body is None:
-            return None
-
-    r = requests.post(url, headers=headers, params=params, data=body, timeout=120)
-
+def parse_date(date_str: str, field: str = "fecha") -> date:
+    """Convierte YYYY-MM-DD a date. Lanza ValueError con mensaje claro."""
     try:
-        data = r.json()
-    except Exception:
-        log(f"Respuesta no es JSON: {r.text[:200]}", "ERR")
-        return None
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        raise ValueError(f"{field} inválida: '{date_str}' (formato esperado: YYYY-MM-DD)")
 
-    if r.status_code != 200:
-        detail = data.get("detail", data)
-        log(f"Error {r.status_code}: {json.dumps(detail, ensure_ascii=False)[:300]}", "ERR")
-        return None
+def is_valid_json_response(response_data: Dict[str, Any]) -> bool:
+    """Valida estructura mínima de respuesta de API."""
+    if not isinstance(response_data, dict):
+        return False
+    required_keys = ['detail']
+    return all(key in response_data for key in required_keys)
 
-    return data
+# ========== API PÚBLICA ==========
 
+class SiigoSync:
+    """Todo el flujo vive aquí: config, customer y credenciales se leen de
+    self, no se pasan como parámetros entre funciones."""
 
-# ─────────────────────────────────────────────
-#  Sincronización de un módulo completo
-# ─────────────────────────────────────────────
+    def __init__(self, customer: int, config: Config, username: str, access_key: str):
+        if not config.api_url or not isinstance(config.api_url, str):
+            raise ValueError(f"api_url es obligatorio, recibido: {config.api_url!r}")
+        if not isinstance(customer, int) or isinstance(customer, bool) or customer <= 0:
+            raise ValueError(f"customer debe ser un entero positivo, recibido: {customer!r}")
+        if not username or not username.strip():
+            raise ValueError("username es obligatorio")
+        if not access_key or not access_key.strip():
+            raise ValueError("access_key es obligatorio")
 
-def sync_module(base_url, jwt, module_name, args):
-    module_cfg = MODULES[module_name]
-    section(f"{module_cfg['description'].upper()}  [{module_name}]")
+        self.customer = customer
+        self.config = config
+        self.username = username
+        self.access_key = access_key
 
-    # Primera página — con clear=True para limpiar datos del rango
-    log(f"Página 1 / ? (page_size={args.page_size})...")
-    result = call_module(base_url, jwt, module_name, module_cfg, args, page=1, clear_first_page=True)
+    # ========== API ==========
 
-    if result is None:
-        log(f"Módulo {module_name} omitido por error.", "WARN")
-        return
+    async def _generate_api_token(self, http_client: httpx.AsyncClient) -> Optional[str]:
+        """Genera token de autenticación (httpx async)."""
+        try:
+            data = {
+                'username': self.config.api_user,
+                'password': self.config.api_password,
+                'key': self.customer,
+            }
 
-    detail = result.get("detail", {})
-    total_results = detail.get("total_results", 0)
-    total_pages = detail.get("pages", 1) or 1
-    message = result.get("message", "")
+            # La barra final evita el 307 de FastAPI (/token -> /token/)
+            response = await http_client.post(
+                f"{self.config.api_url}/token/",
+                data=data,
+                headers={'Accept': 'application/json'}
+            )
 
-    log(f"{message}  (total={total_results}, páginas={total_pages})", "OK")
+            if response.status_code != 200:
+                logger.error(f"Error generando token: {response.status_code} - {response.text}")
+                return None
 
-    if isinstance(detail.get("saved"), list):
-        for s in detail["saved"]:
-            log(f"  tabla '{s['table']}': {s['total']} registros")
+            token = response.json().get('access_token')
+            if not token:
+                logger.error("Token no encontrado en respuesta")
+                return None
 
-    # Páginas adicionales
-    for page in range(2, total_pages + 1):
-        log(f"Página {page} / {total_pages}...")
-        result = call_module(
-            base_url, jwt, module_name, module_cfg, args,
-            page=page,
-            clear_first_page=False,   # no limpiar en páginas siguientes
+            return f"Bearer {token}"
+        except Exception as e:
+            logger.error(f"Excepción en _generate_api_token: {e}", exc_info=True)
+            return None
+
+    async def _generate_siigo_token(
+        self, http_client: httpx.AsyncClient, api_token: str
+    ) -> Optional[str]:
+        """Abre la sesión Siigo en el backend con las credenciales del cliente.
+
+        Requiere el Bearer de /token/ y manda username/access_key como JSON.
+        El backend guarda la sesión; los endpoints generate/* siguen usando el
+        Bearer de la API, no lo que devuelve esta función.
+        """
+        try:
+            response = await http_client.post(
+                f"{self.config.api_url}/v1/siigo/generate/token",
+                json={
+                    'username': self.username,
+                    'access_key': self.access_key,
+                },
+                headers={
+                    'Accept': 'application/json',
+                    'Authorization': api_token,
+                }
+            )
+
+            if response.status_code != 200:
+                logger.error(
+                    f"Error generando token Siigo: {response.status_code} - {response.text[:500]}"
+                )
+                return None
+
+            return response.json().get('message')
+
+        except Exception as e:
+            logger.error(f"Excepción en _generate_siigo_token: {e}", exc_info=True)
+            return None
+
+    async def _request_api(
+        self,
+        http_client: httpx.AsyncClient,
+        process: str,
+        page: int,
+        date_start: str,
+        date_end: str,
+        clear: bool = True
+    ) -> Optional[Dict]:
+        """Realiza request a API de Siigo con validación de respuesta.
+
+        date_start/date_end llegan siempre como YYYY-MM-DD; la conversión a ISO
+        con hora se hace aquí para que ambas ramas puedan reparsear la fecha.
+        """
+        try:
+            token = await self._generate_api_token(http_client)
+
+            if not token:
+                logger.error("No se pudo obtener token de autenticación")
+                return None
+
+            # Preparar datos según tipo de proceso
+            if process in PROCESS_DATE_RANGE:
+                suffix = PROCESS_DATE_RANGE[process]
+                data = {
+                    f"{suffix}_start": f"{date_start}T00:00:00",
+                    f"{suffix}_end": f"{date_end}T23:59:59",
+                }
+            else:
+                date_obj = datetime.strptime(date_start, "%Y-%m-%d")
+                data = {
+                    'month': date_obj.month,
+                    'year': date_obj.year
+                }
+
+            response = await http_client.post(
+                f"{self.config.api_url}/v1/siigo/generate/{process}",
+                params={
+                    'page': page,
+                    'pageSize': self.config.page_size,
+                    'clear': str(clear).lower()
+                },
+                data=data,
+                headers={
+                    'Accept': 'application/json',
+                    'Authorization': token
+                }
+            )
+
+            logger.info(f"[{process}] Request: página {page}")
+
+            if response.status_code != 200:
+                logger.error(
+                    f"[{process}] página {page}: HTTP {response.status_code} - {response.text[:500]}"
+                )
+                return None
+
+            try:
+                response_json = response.json()
+            except json.JSONDecodeError:
+                logger.error(f"Respuesta no es JSON válida: {response.text[:500]}")
+                return None
+
+            if not is_valid_json_response(response_json):
+                logger.error(f"Respuesta no tiene estructura esperada: {response_json}")
+                return None
+
+            details = response_json.get('detail', {})
+
+            # Usar .get() para evitar KeyError
+            params = {
+                'data': data,
+                'page': details.get('page', page),
+                'pages': details.get('pages', 1),
+                'page_size': details.get('page_size', self.config.page_size),
+                'module': process,
+                'execute_date': details.get('execute_date'),
+                'end_date': details.get('end_date'),
+                'total_results': details.get('total_results'),
+                'saved': details.get('saved')
+            }
+
+            logger.info(
+                f"[{process}] Éxito: página {page}/{details.get('pages', 1)} "
+                f"({details.get('total_results')} resultados)"
+            )
+
+            return params
+
+        except Exception as e:
+            logger.error(f"Excepción en _request_api: {e}", exc_info=True)
+            return None
+
+    # ========== PROCESAMIENTO ==========
+
+    async def _seed_process(
+        self,
+        http_client: httpx.AsyncClient,
+        process: str,
+        date_start: str,
+        date_end: str,
+        tasks_queue: asyncio.Queue,
+        page: int = 1,
+        unique: bool = False
+    ) -> Optional[Dict]:
+        """Ejecuta la página 1 de forma síncrona y encola las páginas restantes.
+
+        La primera petición es obligatoriamente bloqueante: su respuesta trae
+        'pages', el total que hay que recorrer. Sin ese dato no se sabe cuántas
+        tareas encolar.
+
+        Devuelve el resultado de la página 1, o None si falló.
+        """
+        clear = not unique
+
+        result = await self._request_api(
+            http_client, process, page, date_start, date_end, clear
         )
+
         if result is None:
-            log(f"Error en página {page}, se detiene paginación.", "WARN")
-            break
+            logger.warning(f"[{process}] página {page} falló; no se encolan páginas adicionales")
+            return None
 
-        msg = result.get("message", "")
-        saved_total = sum(s["total"] for s in result.get("detail", {}).get("saved", []))
-        log(f"{msg}  (+{saved_total} registros)", "OK")
+        if unique:
+            return result
 
+        pages = result.get('pages') or 1
 
-# ─────────────────────────────────────────────
-#  CLI
-# ─────────────────────────────────────────────
+        for next_page in range(page + 1, pages + 1):
+            # clear=False: solo la página 1 limpia los datos previos
+            await tasks_queue.put(
+                (process, next_page, date_start, date_end, False)
+            )
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Sincroniza módulos de Siigo contra la ESuite Account API.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
+        if pages > page:
+            logger.info(f"[{process}] {pages - page} páginas encoladas (total {pages})")
 
-    # Conexión
-    conn = parser.add_argument_group("Conexión")
-    conn.add_argument("--url", default=None, help="URL base de la API (ej: http://localhost:8000)")
-    conn.add_argument("--username", default=None, help="Usuario ESuite")
-    conn.add_argument("--password", default=None, help="Contraseña ESuite")
-    conn.add_argument("--key", default=None, type=int, help="ID del cliente (cliente_id)")
+        return result
 
-    # Siigo
-    siigo = parser.add_argument_group("Credenciales Siigo")
-    siigo.add_argument("--siigo-username", help="Usuario de Siigo (email)")
-    siigo.add_argument("--siigo-access-key", help="Access key de Siigo")
-    siigo.add_argument(
-        "--skip-token",
-        action="store_true",
-        help="Omitir la generación del token Siigo (usar el token ya almacenado)",
-    )
+    async def _process_queue(self, tasks_queue: asyncio.Queue) -> None:
+        """Procesa cola de tareas con N workers."""
 
-    # Módulos
-    mods = parser.add_argument_group("Módulos")
-    mods.add_argument(
-        "--modules",
-        nargs="+",
-        metavar="MODULO",
-        help="Módulos a sincronizar (ej: invoices customers products)",
-    )
-    mods.add_argument(
-        "--all",
-        action="store_true",
-        help="Sincronizar todos los módulos disponibles",
-    )
-    mods.add_argument(
-        "--list-modules",
-        action="store_true",
-        help="Listar módulos disponibles y salir",
-    )
+        async def worker(worker_id: int):
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http_client:
+                while True:
+                    try:
+                        task = await asyncio.wait_for(tasks_queue.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        break
 
-    # Rango de fechas
-    dates = parser.add_argument_group("Rango de fechas (YYYY-MM-DD)")
-    dates.add_argument("--date-start", metavar="FECHA", help="Fecha de inicio (created_start / date_start / due_date_start)")
-    dates.add_argument("--date-end", metavar="FECHA", help="Fecha de fin (created_end / date_end / due_date_end)")
+                    try:
+                        await self._request_api(http_client, *task)
+                    except Exception as e:
+                        logger.error(f"Worker {worker_id} error: {e}", exc_info=True)
+                    finally:
+                        tasks_queue.task_done()
 
-    # Balance report
-    bal = parser.add_argument_group("Opciones de balance report")
-    bal.add_argument("--year", type=int, help="Año del reporte (requerido para balance-report)")
-    bal.add_argument("--month", type=int, metavar="1-12", help="Mes del reporte")
-    bal.add_argument("--month-start", type=int, metavar="1-12", help="Mes inicio del rango")
-    bal.add_argument("--month-end", type=int, metavar="1-12", help="Mes fin del rango")
-    bal.add_argument("--account-start", metavar="CUENTA", help="Cuenta contable inicio")
-    bal.add_argument("--account-end", metavar="CUENTA", help="Cuenta contable fin")
-    bal.add_argument(
-        "--includes-tax-difference",
-        action="store_true",
-        default=None,
-        help="Incluir diferencia de impuestos en balance report",
-    )
+        workers = [
+            asyncio.create_task(worker(i))
+            for i in range(self.config.workers)
+        ]
 
-    # Document types
-    parser.add_argument("--doc-type", metavar="TIPO", help="Tipo de documento para document-types (ej: FV)")
+        await tasks_queue.join()
 
-    # Paginación
-    parser.add_argument("--page-size", type=int, default=100, metavar="N", help="Registros por página (default: 100, max: 100)")
+        for w in workers:
+            w.cancel()
 
-    return parser.parse_args()
+        logger.info("Todas las tareas procesadas")
 
+    async def run_sync(
+        self,
+        date_start: str,
+        date_end: str,
+        process: Optional[str] = None,
+        page: Optional[int] = None,
+        unique: bool = False,
+    ) -> Dict[str, Any]:
+        import time
+        start_time = time.time()
 
-# ─────────────────────────────────────────────
-#  Main
-# ─────────────────────────────────────────────
+        parsed_start = parse_date(date_start, "date_start")
+        parsed_end = parse_date(date_end, "date_end")
+        if parsed_start > parsed_end:
+            raise ValueError(f"date_start ({date_start}) no puede ser posterior a date_end ({date_end})")
 
-def main():
-    args = parse_args()
+        if process is not None and process not in PROCESS:
+            raise ValueError(f"process inválido: '{process}'. Opciones: {', '.join(PROCESS)}")
 
-    if args.list_modules:
-        print("\nMódulos disponibles:\n")
-        for name, cfg in MODULES.items():
-            date_info = f"  [fechas: {cfg['date_fields']}]" if cfg["date_fields"] else ""
-            print(f"  {name:<35} {cfg['description']}{date_info}")
-        print()
-        sys.exit(0)
+        if page is not None and (not isinstance(page, int) or page < 1):
+            raise ValueError(f"page debe ser un entero >= 1, recibido: {page!r}")
 
-    if not args.url or not args.username or not args.password or args.key is None:
-        print("ERROR: --url, --username, --password y --key son requeridos.")
-        sys.exit(1)
+        start_page = page or 1
+        process_list = [process] if process else list(PROCESS)
 
-    if not args.all and not args.modules:
-        print("ERROR: especifica --modules o usa --all para sincronizar todos.\n")
-        print("Módulos disponibles:", ", ".join(ALL_MODULES))
-        sys.exit(1)
+        logger.info(f"Iniciando sincronización cliente={self.customer} procesos={len(process_list)}")
 
-    selected = ALL_MODULES if args.all else args.modules
+        tasks_queue = asyncio.Queue()
+        ok, failed = [], []
 
-    invalid = [m for m in selected if m not in MODULES]
-    if invalid:
-        print(f"ERROR: módulos no reconocidos: {', '.join(invalid)}")
-        print("Módulos disponibles:", ", ".join(ALL_MODULES))
-        sys.exit(1)
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http_client:
+            api_token = await self._generate_api_token(http_client)
+            if not api_token:
+                raise RuntimeError("No se pudo obtener el token de la API")
 
-    if not args.skip_token and (not args.siigo_username or not args.siigo_access_key):
-        print("ERROR: --siigo-username y --siigo-access-key son requeridos (o usa --skip-token).")
-        sys.exit(1)
+            siigo_token = await self._generate_siigo_token(http_client, api_token)
+            if siigo_token is None:
+                raise RuntimeError(f"No se pudo abrir la sesión Siigo para el cliente {self.customer}")
 
-    base_url = args.url.rstrip("/")
+            logger.info("Sesión Siigo establecida")
 
-    print(f"\n{'═' * 55}")
-    print(f"  SYNC SIIGO  —  cliente_id={args.key}")
-    print(f"  URL: {base_url}")
-    print(f"  Módulos: {', '.join(selected)}")
-    if args.date_start or args.date_end:
-        print(f"  Rango: {args.date_start or '(sin inicio)'} → {args.date_end or '(sin fin)'}")
-    print(f"{'═' * 55}")
+            for proc in process_list:
+                result = await self._seed_process(
+                    http_client, proc, date_start, date_end, tasks_queue,
+                    page=start_page, unique=unique
+                )
+                (ok if result is not None else failed).append(proc)
 
-    jwt = login(base_url, args.username, args.password, args.key)
+        queued = tasks_queue.qsize()
 
-    if not args.skip_token:
-        generate_siigo_token(base_url, jwt, args.siigo_username, args.siigo_access_key)
+        if queued:
+            await self._process_queue(tasks_queue)
+        else:
+            logger.info("No hay páginas adicionales que procesar")
 
-    start_time = datetime.now()
+        elapsed = time.time() - start_time
+        logger.info(f"Sincronización terminada en {elapsed:.2f}s (ok={len(ok)} fallidos={len(failed)})")
 
-    for module_name in selected:
-        sync_module(base_url, jwt, module_name, args)
-
-    elapsed = (datetime.now() - start_time).total_seconds()
-    print(f"\n{'═' * 55}")
-    print(f"  Sincronización completada en {elapsed:.1f}s")
-    print(f"{'═' * 55}\n")
-
-
-if __name__ == "__main__":
-    main()
+        return {
+            'customer': self.customer,
+            'processes': process_list,
+            'ok': ok,
+            'failed': failed,
+            'queued': queued,
+            'elapsed': elapsed,
+        }
