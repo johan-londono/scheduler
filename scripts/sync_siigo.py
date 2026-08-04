@@ -99,6 +99,9 @@ class SiigoSync:
         self.config = config
         self.username = username
         self.access_key = access_key
+        # ponytail: token único por run_sync (vive ~5 min). Si una corrida supera
+        # ese tiempo, renovar por expiración (401 -> regenerar) en _request_api.
+        self._api_token: Optional[str] = None
 
     # ========== API ==========
 
@@ -181,10 +184,10 @@ class SiigoSync:
         con hora se hace aquí para que ambas ramas puedan reparsear la fecha.
         """
         try:
-            token = await self._generate_api_token(http_client)
+            token = self._api_token
 
             if not token:
-                logger.error("No se pudo obtener token de autenticación")
+                logger.error("No hay token de autenticación; run_sync debe generarlo primero")
                 return None
 
             # Preparar datos según tipo de proceso
@@ -369,6 +372,7 @@ class SiigoSync:
             api_token = await self._generate_api_token(http_client)
             if not api_token:
                 raise RuntimeError("No se pudo obtener el token de la API")
+            self._api_token = api_token
 
             siigo_token = await self._generate_siigo_token(http_client, api_token)
             if siigo_token is None:
