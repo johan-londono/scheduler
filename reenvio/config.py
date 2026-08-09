@@ -6,6 +6,7 @@ antes de lanzar el subprocess). Las vars SCHEDULER_DB_* ya están en el
 entorno del worker y se heredan automáticamente.
 """
 import os
+import re
 
 # Requeridas — deben venir de scheduler_credentials vía env_config
 MAIN_DB_HOST     = os.environ['MAIN_DB_HOST']
@@ -42,11 +43,24 @@ KEY_CLI_FILTER = os.getenv('KEY_CLI_FILTER', '').strip()
 #   FILTRO_MES   = YYYY-MM             (mes específico)
 #   FILTRO_ANIO  = YYYY                (año específico)
 #   FILTRO_DESDE + FILTRO_HASTA        (rango personalizado YYYY-MM-DD)
-FILTRO_DIA   = os.getenv('FILTRO_DIA',   '').strip()
-FILTRO_MES   = os.getenv('FILTRO_MES',   '').strip()
-FILTRO_ANIO  = os.getenv('FILTRO_ANIO',  '').strip()
-FILTRO_DESDE = os.getenv('FILTRO_DESDE', '').strip()
-FILTRO_HASTA = os.getenv('FILTRO_HASTA', '').strip()
+def _filtro(nombre: str, patron: str) -> str:
+    """Lee un FILTRO_* validando su formato.
+
+    Estos valores se embeben en el SQL que corre contra la DB de cada cliente y
+    ya no vienen solo del .env: llegan de scheduler_credentials, editable por
+    cualquier admin de la API. Validar el formato cierra la vía de inyección.
+    """
+    valor = os.getenv(nombre, '').strip()
+    if valor and not re.fullmatch(patron, valor):
+        raise ValueError(f"{nombre} con formato inválido: {valor!r} (esperado {patron})")
+    return valor
+
+
+FILTRO_DIA   = _filtro('FILTRO_DIA',   r'\d{4}-\d{2}-\d{2}')
+FILTRO_MES   = _filtro('FILTRO_MES',   r'\d{4}-\d{2}')
+FILTRO_ANIO  = _filtro('FILTRO_ANIO',  r'\d{4}')
+FILTRO_DESDE = _filtro('FILTRO_DESDE', r'\d{4}-\d{2}-\d{2}')
+FILTRO_HASTA = _filtro('FILTRO_HASTA', r'\d{4}-\d{2}-\d{2}')
 
 
 def filtro_fecha_sql(col: str) -> str:
@@ -54,8 +68,7 @@ def filtro_fecha_sql(col: str) -> str:
     Retorna la cláusula AND de fecha según los FILTRO_* activos.
     Sin ningún filtro configurado aplica el mes actual por defecto.
 
-    Valores vienen de variables de entorno (no de input de usuario),
-    por lo que es seguro embeberloss directamente en el SQL.
+    El formato de cada valor ya se validó en _filtro().
     """
     if FILTRO_DIA:
         return f"AND DATE({col}) = '{FILTRO_DIA}'"

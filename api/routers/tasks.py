@@ -1,11 +1,14 @@
+import inspect
 import json
 from typing import Any
 
+import psycopg2
 import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.deps import enmascarar, get_db, require_role
+from api.deps import enmascarar, error_db, get_db, require_role
+from app import celery_app
 
 router = APIRouter()
 
@@ -13,6 +16,36 @@ router = APIRouter()
 def _sin_secretos(row) -> dict:
     """Enmascara los kwargs de una tarea (pueden traer access keys, passwords, etc)."""
     return {**row, "kwargs": enmascarar(dict(row["kwargs"] or {}))}
+
+
+def _validar_llamada(function: str, args, kwargs, credentials_id) -> None:
+    """Rechaza tareas que el worker no podría ejecutar.
+
+    La DB manda el *cuándo*, pero el *cómo* tiene que existir en Python: sin esta
+    comprobación una función mal escrita o un kwarg de más se aceptan con 201 y
+    fallan en silencio cuando Beat los encola.
+
+    Incluye el env_config que app.py inyecta cuando la tarea tiene credenciales.
+    """
+    tarea = celery_app.tasks.get(function)
+    if tarea is None:
+        disponibles = sorted(n for n in celery_app.tasks if n.startswith("tasks."))
+        raise HTTPException(
+            status_code=400,
+            detail=f"La función '{function}' no está registrada en el worker. Disponibles: {disponibles}",
+        )
+
+    kwargs = dict(kwargs or {})
+    if credentials_id is not None:
+        kwargs["env_config"] = {}
+
+    try:
+        inspect.signature(tarea.run).bind(*(args or []), **kwargs)
+    except TypeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Los args/kwargs no encajan con la firma de '{function}': {exc}",
+        )
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -63,7 +96,9 @@ def list_tasks(conn=Depends(get_db), _=Depends(require_role("viewer"))):
 
 @router.post("", status_code=201)
 def create_task(body: TaskCreate, conn=Depends(get_db), _=Depends(require_role("admin"))):
-    """Crea una nueva tarea. Requiere reiniciar los servicios para que surta efecto."""
+    """Crea una nueva tarea. Beat la toma en la siguiente recarga (<60s)."""
+    _validar_llamada(body.function, body.args, body.kwargs, body.credentials_id)
+
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         try:
             cur.execute("""
@@ -80,17 +115,26 @@ def create_task(body: TaskCreate, conn=Depends(get_db), _=Depends(require_role("
             ))
             conn.commit()
             return _sin_secretos(cur.fetchone())
-        except Exception as e:
+        except psycopg2.Error as e:
             conn.rollback()
-            raise HTTPException(status_code=400, detail=str(e))
+            # Solo el mensaje: pgerror trae la consulta y el esquema completos.
+            raise HTTPException(status_code=400, detail=error_db(e))
 
 
 @router.patch("/{name}")
 def update_task(name: str, body: TaskPatch, conn=Depends(get_db), _=Depends(require_role("admin"))):
-    """Actualiza parcialmente una tarea. Solo los campos enviados se modifican."""
-    campos = body.model_dump(exclude_none=True)
+    """Actualiza parcialmente una tarea. Solo los campos enviados se modifican.
+
+    exclude_unset (no exclude_none): enviar {"credentials_id": null} desasigna
+    las credenciales. Con exclude_none se ignoraba en silencio y respondía 200.
+    """
+    campos = body.model_dump(exclude_unset=True)
     if not campos:
         raise HTTPException(status_code=400, detail="No se enviaron campos para actualizar.")
+
+    no_nulos = [c for c in campos if c != "credentials_id" and campos[c] is None]
+    if no_nulos:
+        raise HTTPException(status_code=400, detail=f"Estos campos no admiten null: {no_nulos}")
 
     # Serializar args/kwargs a JSON si vienen en el body
     if "args" in campos:
@@ -110,6 +154,15 @@ def update_task(name: str, body: TaskPatch, conn=Depends(get_db), _=Depends(requ
         if not row:
             conn.rollback()
             raise HTTPException(status_code=404, detail=f"Tarea '{name}' no encontrada.")
+
+        # Validar sobre la fila ya actualizada: un PATCH parcial puede romper la
+        # combinación function/args/kwargs aunque cada campo suelto sea válido.
+        try:
+            _validar_llamada(row["function"], row["args"], row["kwargs"], row["credentials_id"])
+        except HTTPException:
+            conn.rollback()
+            raise
+
         conn.commit()
         return _sin_secretos(row)
 
@@ -128,12 +181,9 @@ def delete_task(name: str, conn=Depends(get_db), _=Depends(require_role("admin")
 @router.post("/{name}/run")
 def run_task(name: str, conn=Depends(get_db), _=Depends(require_role("operator"))):
     """Encola la tarea en Redis para ejecución inmediata (requiere worker activo)."""
-    from celery import Celery
-    import os
-
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
-            SELECT t.function, t.args, t.kwargs, c.env_vars
+            SELECT t.function, t.args, t.kwargs, t.credentials_id, c.env_vars
             FROM scheduler_tasks t
             LEFT JOIN scheduler_credentials c ON c.id = t.credentials_id
             WHERE t.name = %s
@@ -143,12 +193,14 @@ def run_task(name: str, conn=Depends(get_db), _=Depends(require_role("operator")
     if not tarea:
         raise HTTPException(status_code=404, detail=f"Tarea '{name}' no encontrada.")
 
+    # Filas creadas antes de que existiera la validación pueden ser inejecutables.
+    _validar_llamada(tarea["function"], tarea["args"], tarea["kwargs"], tarea["credentials_id"])
+
     kwargs = dict(tarea["kwargs"] or {})
     if tarea["env_vars"]:
         kwargs["env_config"] = dict(tarea["env_vars"])
 
-    sender = Celery(broker=os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
-    resultado = sender.send_task(
+    resultado = celery_app.send_task(
         tarea["function"],
         args=list(tarea["args"] or []),
         kwargs=kwargs,

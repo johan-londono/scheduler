@@ -1,7 +1,7 @@
 #!/bin/bash
 # Reinicia celery-worker, celery-beat y celery-api.
 # Necesario despues de cambios en la tabla scheduler_tasks, .env, tasks/ o app.py.
-# Uso: sudo bash scripts/reiniciar.sh
+# Uso: sudo bash ops/reiniciar.sh
 
 set -e
 

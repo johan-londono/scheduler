@@ -7,7 +7,15 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import jwt
 
-_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "")
+# Sin default: PyJWT firma HS256 con clave vacía sin protestar, así que un .env
+# incompleto dejaba la API aceptando tokens que cualquiera puede fabricar.
+_SECRET_KEY = os.environ.get("JWT_SECRET_KEY") or ""
+if len(_SECRET_KEY) < 32:
+    raise RuntimeError(
+        "JWT_SECRET_KEY falta o es demasiado corta (mínimo 32 caracteres). "
+        "Generar con: python3 -c \"import secrets; print(secrets.token_hex(64))\""
+    )
+
 _ALGORITHM = "HS256"
 _ACCESS_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 _REFRESH_EXPIRE_DAYS = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", "7"))

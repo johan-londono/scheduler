@@ -1,4 +1,6 @@
 """Endpoints de autenticación: login, refresh de token, logout."""
+from datetime import datetime, timezone
+
 import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -52,6 +54,14 @@ def login(body: LoginRequest, conn=Depends(get_db)):
             INSERT INTO scheduler_refresh_tokens (user_id, token_hash, expira_en)
             VALUES (%s, %s, %s)
         """, (user["id"], token_hash, expira_en))
+
+        # La tabla no se purgaba nunca y crecía con cada login. Se borran solo
+        # los vencidos hace rato: los revocados aún vigentes hacen falta para
+        # detectar reuso de token robado.
+        cur.execute("""
+            DELETE FROM scheduler_refresh_tokens
+            WHERE user_id = %s AND expira_en < NOW() - INTERVAL '7 days'
+        """, (user["id"],))
     conn.commit()
 
     return {
@@ -96,8 +106,10 @@ def refresh(body: RefreshRequest, conn=Depends(get_db)):
             detail="Token ya utilizado. Todas las sesiones han sido cerradas por seguridad.",
         )
 
-    from datetime import datetime, timezone
-    if row["expira_en"].replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+    # astimezone, no replace: expira_en es TIMESTAMPTZ y viene con el offset de
+    # la sesión de Postgres. replace(tzinfo=utc) lo reinterpretaba como UTC y
+    # regalaba (o quitaba) hasta 6 horas de vida al token.
+    if row["expira_en"].astimezone(timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expirado.")
 
     if not row["activo"]:

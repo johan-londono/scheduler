@@ -15,14 +15,21 @@ Reglas:
 """
 import asyncio
 import asyncpg
-import base64
-import httpx
-import json
 import sys
 import traceback
 
-from reenvio_service.config import MAX_INTENTOS, API_PYTHON_URL, filtro_fecha_sql
-from reenvio_service.error_log import ensure_nc_error_table, insert_nc_error
+from reenvio.comun import (
+    clasificar,
+    cufe,
+    detalle_fallo,
+    documento_atascado,
+    error_mensaje,
+    llamar_api,
+    registrar_error,
+    resumen,
+)
+from reenvio.config import MAX_INTENTOS, filtro_fecha_sql
+from reenvio.errores import ensure_nc_error_table, insert_nc_error, ultimos_errores
 
 _client_locks: dict[str, asyncio.Lock] = {}
 
@@ -60,6 +67,33 @@ _QUERY_PENDIENTES_SIN_CONSECUTIVO = f"""
     ORDER  BY nc.created_at ASC
 """
 
+# NC que ya gastaron todos los intentos: el filtro de pendientes las excluye,
+# así que sin esta consulta desaparecen del reporte para siempre.
+_QUERY_AGOTADAS = f"""
+    SELECT nc.id,
+           COALESCE(nc.consecutivo, nc.id) AS consecutivo,
+           COALESCE(nc.diannumeroenvios, 0) AS intentos
+    FROM   contablenotascreditos nc
+    WHERE  nc.tipodocumentointerno_id = 3
+      AND  nc.diancufe IS NULL
+      AND  COALESCE(nc.diannumeroenvios, 0) >= $1
+      {filtro_fecha_sql("nc.created_at")}
+    ORDER  BY nc.created_at ASC
+"""
+
+# Misma consulta para clientes cuya tabla no tiene la columna consecutivo
+_QUERY_AGOTADAS_SIN_CONSECUTIVO = f"""
+    SELECT nc.id,
+           nc.id AS consecutivo,
+           COALESCE(nc.diannumeroenvios, 0) AS intentos
+    FROM   contablenotascreditos nc
+    WHERE  nc.tipodocumentointerno_id = 3
+      AND  nc.diancufe IS NULL
+      AND  COALESCE(nc.diannumeroenvios, 0) >= $1
+      {filtro_fecha_sql("nc.created_at")}
+    ORDER  BY nc.created_at ASC
+"""
+
 
 async def llamar_getnotacredito(
     token: str,
@@ -68,41 +102,11 @@ async def llamar_getnotacredito(
     referenciada: bool,
 ) -> dict:
     """Llama a GET /api/v1/notacredito/getnotacredito/{data_b64} y retorna el resultado."""
-    payload = json.dumps({
-        "key_cli":     key_cli,
-        "nc_id":       nc_id,
+    return await llamar_api("notacredito/getnotacredito", token, {
+        "key_cli":      key_cli,
+        "nc_id":        nc_id,
         "referenciada": referenciada,
     })
-    data_b64 = base64.urlsafe_b64encode(payload.encode()).decode()
-
-    url = f"{API_PYTHON_URL}/api/v1/notacredito/getnotacredito/{data_b64}"
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        if not resp.is_success:
-            try:
-                body  = resp.json()
-                inner = body.get("detail", {})
-                if isinstance(inner, dict):
-                    return {
-                        "succeeded":  False,
-                        "reasonCode": inner.get("reasonCode", resp.status_code),
-                        "reason":     inner.get("reason", ""),
-                        "message":    inner.get("message", ""),
-                        "detail":     inner.get("detail", []),
-                    }
-            except Exception:
-                pass
-            return {
-                "succeeded":  False,
-                "reasonCode": f"HTTP_{resp.status_code}",
-                "reason":     f"Error HTTP {resp.status_code}",
-                "message":    resp.text[:500],
-                "detail":     [],
-            }
-        return resp.json()
 
 
 async def reenviar_cliente_nc(
@@ -145,16 +149,27 @@ async def _procesar_cliente(
         async with pool.acquire() as conn:
             try:
                 ncs = await conn.fetch(_QUERY_PENDIENTES, MAX_INTENTOS)
+                atascadas = await conn.fetch(_QUERY_AGOTADAS, MAX_INTENTOS)
             except asyncpg.exceptions.UndefinedColumnError:
                 ncs = await conn.fetch(_QUERY_PENDIENTES_SIN_CONSECUTIVO, MAX_INTENTOS)
+                atascadas = await conn.fetch(_QUERY_AGOTADAS_SIN_CONSECUTIVO, MAX_INTENTOS)
 
         async with scheduler_pool.acquire() as conn:
             await ensure_nc_error_table(conn)
+            errores = await ultimos_errores(conn, "nc", [n["id"] for n in atascadas])
+
+        agotadas_detalle = [
+            documento_atascado(key_cli, nombre, f"NC {n['consecutivo']}",
+                               n["intentos"], errores.get(n["id"]))
+            for n in atascadas
+        ]
 
         if not ncs:
-            return _summary(key_cli, nombre, total=0)
+            return resumen(key_cli, nombre, total=0, agotadas=len(atascadas),
+                           agotadas_detalle=agotadas_detalle)
 
-        exitosas = fallidas = omitidas = 0
+        exitosas = fallidas = omitidas = ya_emitidas = 0
+        fallidas_detalle: list[dict] = []
 
         for nc in ncs:
             nc_id            = nc['id']
@@ -181,79 +196,59 @@ async def _procesar_cliente(
                     'detail':     '',
                 }
 
-            succeeded   = result.get('succeeded', False)
+            estado      = clasificar(result)
             reason_code = result.get('reasonCode', '')
 
-            if succeeded or reason_code == 'ALREADY_EMITTED':
+            if estado == 'exito':
                 exitosas += 1
-                cufe_short = result.get('cufe', '')[:20]
-                print(f"[OK] cufe={cufe_short}...")
+                print(f"[OK] cufe={cufe(result)}...")
 
-            elif reason_code == 'TRANSMISSION_DISABLED':
-                remaining  = len(ncs) - (exitosas + fallidas + omitidas)
-                omitidas  += remaining
-                print(f"[OMITIDA] transmitir=False")
+            elif estado == 'ya_emitido':
+                ya_emitidas += 1
+                print("[YA EMITIDO] la DIAN ya tenía el documento aceptado")
+
+            elif estado == 'omitido':
+                omitidas += len(ncs) - (exitosas + fallidas + omitidas + ya_emitidas)
+                print("[OMITIDA] transmitir=False")
                 break
 
             else:
                 fallidas += 1
-                print(f"[FAIL] {reason_code}: {result.get('message', '')[:60]}")
+                print(f"[FAIL] {reason_code}: {str(result.get('message', ''))[:60]}")
 
-                async with scheduler_pool.acquire() as conn:
-                    await insert_nc_error(
-                        conn,
-                        documento_id=nc_id,
-                        intento_numero=intento,
-                        error_codigo=str(reason_code) if reason_code is not None else None,
-                        error_razon=str(result.get('reason', '')),
-                        error_mensaje=json.dumps(
-                            {
-                                'message': str(result.get('message', '')),
-                                'detail':  str(result.get('detail', '')),
-                            },
-                            ensure_ascii=False,
-                        ),
-                        cliente_key=key_cli,
-                    )
+                fallidas_detalle.append(
+                    detalle_fallo(key_cli, nombre, f"NC {prefijo}-{consecutivo}", result)
+                )
 
-        return _summary(key_cli, nombre,
-                        total=len(ncs),
-                        exitosas=exitosas,
-                        fallidas=fallidas,
-                        omitidas=omitidas)
+                await registrar_error(
+                    scheduler_pool, insert_nc_error,
+                    documento_id=nc_id,
+                    intento_numero=intento,
+                    error_codigo=str(reason_code) if reason_code is not None else None,
+                    error_razon=str(result.get('reason', '')),
+                    error_mensaje=error_mensaje(result),
+                    cliente_key=key_cli,
+                )
+
+        return resumen(key_cli, nombre,
+                       total=len(ncs),
+                       exitosas=exitosas,
+                       fallidas=fallidas,
+                       omitidas=omitidas,
+                       ya_emitidas=ya_emitidas,
+                       agotadas=len(atascadas),
+                       fallidas_detalle=fallidas_detalle,
+                       agotadas_detalle=agotadas_detalle)
 
     except (asyncpg.PostgresError, OSError) as exc:
         print(f"[ERROR] Conexión DB — {nombre} ({key_cli}): {exc}", file=sys.stderr)
-        return _summary(key_cli, nombre, total=0, connection_error=str(exc))
+        return resumen(key_cli, nombre, total=0, connection_error=str(exc))
 
     except Exception as exc:
         print(f"[ERROR] Excepción inesperada en NC — {nombre} ({key_cli}):", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        return _summary(key_cli, nombre, total=0, connection_error=f"excepcion: {exc}")
+        return resumen(key_cli, nombre, total=0, connection_error=f"excepcion: {exc}")
 
     finally:
         if pool:
             await pool.close()
-
-
-def _summary(
-    key_cli: str,
-    nombre: str,
-    *,
-    total: int = 0,
-    exitosas: int = 0,
-    fallidas: int = 0,
-    omitidas: int = 0,
-    connection_error: str = None,
-) -> dict:
-    s = {
-        'key_cli':  key_cli,
-        'nombre':   nombre,
-        'total':    total,
-        'exitosas': exitosas,
-        'fallidas': fallidas,
-        'omitidas': omitidas,
-    }
-    if connection_error:
-        s['connection_error'] = connection_error
-    return s

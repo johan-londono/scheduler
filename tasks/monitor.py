@@ -1,9 +1,8 @@
 import logging
-from datetime import datetime
 
 import requests
 
-from app import celery_app
+from app import celery_app, ahora as reloj
 
 logger = logging.getLogger(__name__)
 
@@ -14,12 +13,16 @@ APIS_DEFAULT = [
 
 
 def _verificar_endpoint(nombre, url, timeout=15):
-    """Realiza un GET a la URL y retorna el estado."""
+    """Realiza un GET a la URL y retorna el estado.
+
+    Sano = respuesta < 400. Antes bastaba con cualquier cosa por debajo de 500,
+    así que un 404 o un 401 se reportaban como API en buen estado.
+    """
     try:
         resp = requests.get(url, timeout=timeout)
         return {
             "proceso": nombre,
-            "estado": "OK" if resp.status_code < 500 else "ERROR",
+            "estado": "OK" if resp.ok else "ERROR",
             "detalle": f"HTTP {resp.status_code} en {resp.elapsed.total_seconds():.2f}s",
         }
     except requests.ConnectionError:
@@ -33,12 +36,12 @@ def _verificar_endpoint(nombre, url, timeout=15):
 @celery_app.task(name="tasks.monitor.verificar_apis")
 def verificar_apis(apis=None, destinatario="johan.londono@eholding.com.co"):
     """Verifica el estado de multiples APIs y envia correo con el resultado."""
-    from tasks.envio_correo import enviar_correo
+    from tasks.correo import enviar_correo
 
     if apis is None:
         apis = APIS_DEFAULT
 
-    ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ahora = reloj().strftime("%Y-%m-%d %H:%M:%S")
     logger.info(f"[{ahora}] Verificando estado de {len(apis)} APIs...")
 
     resultados = [_verificar_endpoint(api["name"], api["url"]) for api in apis]

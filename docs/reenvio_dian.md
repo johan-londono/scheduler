@@ -11,21 +11,21 @@ Celery Beat
     ↓  encola según cron (varias veces al día)
 reenviar_documentos_dian (Celery task)
     ↓  subprocess
-esuite_dian_app_v2/reenvio_service/main.py --tipo <X>
+reenvio/main.py --tipo <X>
     ↓  asyncpg (conexión directa a DB de cada cliente)
 DIAN (API de integración)
     ↓  stdout → RESUMEN_JSON
 _acumular_resultado_dian
     ↓  RPUSH
 Redis  →  clave: dian:reporte:YYYY-MM-DD  (TTL 48h)
-    ↓  a las 17:00
+    ↓  una vez al día
 enviar_reporte_dian_diario (Celery task)
     ↓
 enviar_correo (un solo correo consolidado del día)
 ```
 
 Cada ejecución de reenvío **acumula** su resultado en Redis.  
-El correo se envía **una sola vez al día a las 17:00** con la información consolidada de todas las ejecuciones y tipos de documento.
+El correo se envía **una sola vez al día** con la información consolidada de todas las ejecuciones y tipos de documento.
 
 ---
 
@@ -55,7 +55,7 @@ Ejecuta el reenvío para el tipo de documento indicado y acumula el resultado en
 
 ### `enviar_reporte_dian_diario`
 
-Lee Redis, consolida todas las ejecuciones del día y envía el correo. **Programar a las 17:00.**
+Lee Redis, consolida todas las ejecuciones del día y envía el correo. **Programar una vez al día.**
 
 | kwarg          | Tipo        | Requerido | Descripción                                              |
 |----------------|-------------|-----------|----------------------------------------------------------|
@@ -104,7 +104,7 @@ Lee Redis, consolida todas las ejecuciones del día y envía el correo. **Progra
 }
 ```
 
-### Reporte diario (17:00) — obligatorio
+### Reporte diario — obligatorio
 
 ```json
 {
@@ -161,14 +161,14 @@ POST http://localhost:8080/tasks
 { "name": "reenvio_docsoporte_dian", "function": "tasks.reenvio_dian.reenviar_documentos_dian",
   "kwargs": {"tipo_doc": "documentos_soporte"}, "hour": "6", "minute": "30", "credentials_id": 1 }
 
-# Reporte diario (17:00)
+# Reporte diario
 POST http://localhost:8080/tasks
 { "name": "reporte_dian_diario", "function": "tasks.reenvio_dian.enviar_reporte_dian_diario",
   "kwargs": {}, "hour": "17", "minute": "0" }
 ```
 
 Beat recarga la DB cada 60s, así que las tareas nuevas arrancan solas.
-Solo hace falta `sudo bash scripts/reiniciar.sh` si se cambió código Python.
+Solo hace falta `sudo bash ops/reiniciar.sh` si se cambió código Python.
 
 ---
 
@@ -191,7 +191,7 @@ celery -A app call tasks.reenvio_dian.enviar_reporte_dian_diario
 
 ## Correo de notificación
 
-El correo se envía **una vez al día a las 17:00** con la información consolidada de todas las ejecuciones del día.
+El correo se envía **una sola vez al día** con la información consolidada de todas las ejecuciones del día.
 
 **Asunto:** `Reporte DIAN — DD/MM/YYYY — Sin errores / Con errores`
 
@@ -247,7 +247,7 @@ Al enviar el reporte, la clave se elimina de Redis.
 
 ## Protocolo RESUMEN_JSON
 
-El script `reenvio_service.main` imprime en `stdout` la siguiente línea al finalizar:
+El script `reenvio.main` imprime en `stdout` la siguiente línea al finalizar:
 
 ```
 RESUMEN_JSON:{"clientes":2,"facturas":5,"exitosas":4,"fallidas":1,"errores_cx":0,"fallidas_detalle":[...],"errores_conexion":[...],"nombres_clientes":["ABC","XYZ"]}
@@ -288,5 +288,5 @@ El parámetro `destinatarios` que tenían se ignora; el correo ahora lo gestiona
    ```python
    "nuevo_tipo": "nombre para correo y logs",
    ```
-3. Agregar el valor en `TIPOS_VALIDOS` de `esuite_dian_app_v2/reenvio_service/main.py` e implementar la lógica de procesamiento.
+3. Agregar el valor en `TIPOS_VALIDOS` de `reenvio/main.py` e implementar la lógica de procesamiento.
 4. Crear la tarea en la DB vía `POST /tasks` con `"tipo_doc": "nuevo_tipo"` y reiniciar.

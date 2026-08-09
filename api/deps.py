@@ -18,16 +18,38 @@ def enmascarar(datos: dict) -> dict:
 
     Sensible = contiene password/secret/token, o termina en "key".
     El sufijo evita pisar identificadores legitimos como key_cli / key_clis.
+
+    Desciende también por listas: los kwargs de una tarea pueden ser
+    [{"api_key": "..."}] y así se devolvían en claro.
     """
     return {
-        k: "***" if _es_sensible(k) else enmascarar(v) if isinstance(v, dict) else v
+        k: "***" if _es_sensible(k) else _enmascarar_valor(v)
         for k, v in datos.items()
     }
+
+
+def _enmascarar_valor(v):
+    if isinstance(v, dict):
+        return enmascarar(v)
+    if isinstance(v, (list, tuple)):
+        return [_enmascarar_valor(i) for i in v]
+    return v
 
 
 def _es_sensible(clave: str) -> bool:
     c = clave.lower()
     return c.endswith("key") or any(t in c for t in _TERMINOS_SENSIBLES)
+
+
+def error_db(exc) -> str:
+    """Mensaje de un error de Postgres apto para devolver por HTTP.
+
+    str(exc) incluye la consulta y el detalle del esquema; el cliente solo
+    necesita saber qué restricción violó.
+    """
+    diag = getattr(exc, "diag", None)
+    mensaje = getattr(diag, "message_primary", None) or str(exc).splitlines()[0]
+    return mensaje.strip()
 
 
 def get_db():
@@ -77,8 +99,12 @@ _ROL_NIVEL = {"viewer": 0, "operator": 1, "admin": 2}
 
 
 def require_role(*roles: str) -> Callable:
-    """Factory de dependencias por rol. Acepta el rol requerido o superiores."""
-    nivel_requerido = min(_ROL_NIVEL[r] for r in roles)
+    """Factory de dependencias por rol. Acepta el rol requerido o superiores.
+
+    Con varios roles manda el más alto: pedir ("admin", "operator") exige admin.
+    Con min() pasaba lo contrario y el nombre invitaba justo al error opuesto.
+    """
+    nivel_requerido = max(_ROL_NIVEL[r] for r in roles)
 
     def _check(user: dict = Depends(get_current_user)):
         if _ROL_NIVEL.get(user["rol"], -1) < nivel_requerido:

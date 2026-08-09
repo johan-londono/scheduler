@@ -1,6 +1,8 @@
 import os
 import sys
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from celery import Celery
@@ -31,6 +33,16 @@ celery_app.conf.update(
 )
 
 
+def ahora():
+    """Fecha y hora en la zona del scheduler.
+
+    Un solo reloj para crons, logs y reportes: cuando cada módulo elegía la
+    suya, las ejecuciones de última hora de la noche se contabilizaban en el
+    día siguiente. Cambiar `timezone` arriba mueve todo a la vez.
+    """
+    return datetime.now(ZoneInfo(celery_app.conf.timezone))
+
+
 def construir_crontab(tarea):
     """Convierte los campos de schedule de una fila de DB a un objeto crontab de Celery."""
     return crontab(
@@ -52,6 +64,17 @@ def construir_schedule():
     for tarea in tareas:
         nombre = tarea["name"]
         funcion = tarea["function"]
+
+        # Encolar una función que el worker no conoce es tirar el mensaje a un
+        # agujero negro: Redis lo acepta y el worker lo descarta. Mejor no
+        # programarla y dejar constancia en el log.
+        if funcion not in celery_app.tasks:
+            logger.error(
+                f"Tarea '{nombre}' ignorada: la función '{funcion}' no está "
+                f"registrada en el worker."
+            )
+            continue
+
         schedule = construir_crontab(tarea)
         args = tarea.get("args") or []
         kwargs = tarea.get("kwargs") or {}
@@ -73,12 +96,15 @@ def construir_schedule():
     return beat_schedule
 
 
-# Registrar tareas al importar el módulo
-celery_app.conf.beat_schedule = construir_schedule()
-
-# Importar módulos de tareas
-import tasks.sincronizar_cliente_siigo  # noqa: F401, E402
-import tasks.envio_correo  # noqa: F401, E402
-import tasks.sincronizar_cliente_dominus  # noqa: F401, E402
-import tasks.monitor_estado_apis  # noqa: F401, E402
+# Importar módulos de tareas para registrarlas en el worker.
+# El nombre del módulo coincide con el del decorador: tasks/siigo.py registra
+# "tasks.siigo.*". Si dejan de coincidir, la documentación empieza a mentir.
+import tasks.siigo  # noqa: F401, E402
+import tasks.correo  # noqa: F401, E402
+import tasks.dominus  # noqa: F401, E402
+import tasks.monitor  # noqa: F401, E402
 import tasks.reenvio_dian  # noqa: F401, E402
+
+# Importar este módulo NO toca la base de datos: construir_schedule() solo la
+# consulta cuando Beat la llama (beat_scheduler.SchedulerDB). Así la API y los
+# checks pueden importar el registro de tareas sin abrir Postgres.

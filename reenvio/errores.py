@@ -1,8 +1,12 @@
 """
-Manejo de tablas de errores de envío DIAN en la DB de cada cliente.
+Manejo de tablas de errores de envío DIAN.
+
+Las tablas viven en la **DB del scheduler**, no en la de cada cliente: los tres
+flujos reciben `scheduler_pool` y escriben ahí, con la columna cliente_key para
+distinguir de quién es cada error.
 
 Las tablas se crean automáticamente con CREATE TABLE IF NOT EXISTS
-la primera vez que se procesa el cliente, sin necesidad de
+la primera vez que se procesa un cliente, sin necesidad de
 migraciones manuales.
 
 Tablas:
@@ -11,6 +15,40 @@ Tablas:
   - dianenvio_errores_nc         → notas crédito
 """
 import asyncpg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSULTA COMÚN: último error registrado por documento
+# ─────────────────────────────────────────────────────────────────────────────
+
+# tabla y columna de id para cada tipo de documento
+TABLAS = {
+    "facturas":   ("dianenvio_errores",            "factura_id"),
+    "nc":         ("dianenvio_errores_nc",         "documento_id"),
+    "docsoporte": ("dianenvio_errores_docsoporte", "documento_id"),
+}
+
+
+async def ultimos_errores(conn: asyncpg.Connection, tipo: str, ids: list) -> dict:
+    """Último error de cada documento, indexado por id.
+
+    Una sola consulta para todos los ids: es lo que convierte "hay 12 documentos
+    atascados" en "estos 12, y por esto".
+    """
+    if not ids:
+        return {}
+
+    tabla, columna = TABLAS[tipo]
+    rows = await conn.fetch(f"""
+        SELECT DISTINCT ON ({columna})
+               {columna} AS doc_id, error_codigo, error_razon, error_mensaje,
+               intento_numero, created_at
+        FROM   {tabla}
+        WHERE  {columna} = ANY($1::int[])
+        ORDER  BY {columna}, id DESC
+    """, list(ids))
+    return {r["doc_id"]: dict(r) for r in rows}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FACTURAS

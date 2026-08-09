@@ -1,10 +1,11 @@
 import json
 
+import psycopg2
 import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.deps import enmascarar, get_db, require_role
+from api.deps import enmascarar, error_db, get_db, require_role
 
 router = APIRouter()
 
@@ -54,9 +55,9 @@ def create_credential(body: CredentialCreate, conn=Depends(get_db), _=Depends(re
             conn.commit()
             row = cur.fetchone()
             return {"id": row["id"], "name": row["name"], "env_vars": enmascarar(body.env_vars)}
-        except Exception as e:
+        except psycopg2.Error as e:
             conn.rollback()
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=error_db(e))
 
 
 @router.patch("/{credential_id}")
@@ -87,6 +88,9 @@ def delete_credential(credential_id: int, conn=Depends(get_db), _=Depends(requir
             conn.commit()
         except HTTPException:
             raise
-        except Exception as e:
+        except psycopg2.Error as e:
             conn.rollback()
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(
+                status_code=400,
+                detail=f"No se puede eliminar: {error_db(e)}",
+            )

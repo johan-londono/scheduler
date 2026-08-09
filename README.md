@@ -10,6 +10,21 @@ Sistema de tareas programadas con **Celery + Redis + PostgreSQL**, gestionable v
 - **PostgreSQL** — configuración de tareas y credenciales
 - **FastAPI** — API REST para gestionar tareas
 
+## Estructura
+
+```
+api/        API REST: CRUD de tareas y credenciales, auth JWT
+tasks/      Qué se ejecuta y cuándo. Orquesta y reporta por correo
+etl/        Carga de datos desde sistemas externos (Siigo, Dominus)
+reenvio/    Reenvío de documentos a la DIAN
+ops/        Operación: reiniciar/detener/estado, gestión de usuarios
+test/       Checks ejecutables: python test/test_x.py
+```
+
+`tasks/` orquesta; `etl/` y `reenvio/` trabajan. Los módulos de `etl/` y `reenvio/`
+no importan Celery, así que se ejecutan y se prueban por separado. Cada carpeta tiene
+su README con cómo agregar un origen o un tipo de documento nuevo.
+
 ## Instalación
 
 ```bash
@@ -18,10 +33,17 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 sudo .venv/bin/pip install -r requirements.txt
 
 # 2. Crear .env (ver sección Variables de entorno)
+#    JWT_SECRET_KEY es obligatoria: la API no arranca sin ella.
 
-# 3. Crear tablas e importar configuración inicial
-python3 scripts/migrar_db.py
+# 3. Crear tablas y primer usuario
+python3 ops/crear_usuarios.py --email admin@scheduler.local
 ```
+
+> `ops/crear_usuarios.py` y `ops/migrar_db.py` no están versionados (contienen
+> el DDL y se transfieren al servidor a mano). `crear_usuarios.py` crea `scheduler_users`
+> y `scheduler_refresh_tokens`; `migrar_db.py` crea `scheduler_tasks` y
+> `scheduler_credentials`. Sin ellos hay que crear las tablas con el DDL de la
+> sección "Esquema de base de datos" de `CLAUDE.md`.
 
 ## Ejecución en desarrollo
 
@@ -44,7 +66,7 @@ Documentación interactiva de la API: `http://localhost:8080/docs`
 POST /tasks
 {
   "name": "siigo_cliente_456",
-  "function": "tasks.sincronizar_cliente_siigo.sincronizar_siigo",
+  "function": "tasks.siigo.sincronizar_siigo",
   "hour": "1", "minute": "0",
   "kwargs": {"customer_id": 456, "destinatarios": ["ops@empresa.com"]},
   "credentials_id": 1
@@ -56,7 +78,7 @@ Beat la toma sola en menos de 60s. No hay que reiniciar nada.
 1. Crear `tasks/mi_tarea.py` con `@celery_app.task(name="tasks.mi_tarea.mi_funcion")`
 2. Agregar en `app.py`: `import tasks.mi_tarea  # noqa: F401, E402`
 3. Registrar via `POST /tasks` con `"function": "tasks.mi_tarea.mi_funcion"`
-4. `sudo bash scripts/reiniciar.sh` en el servidor — el worker necesita cargar el código nuevo
+4. `sudo bash ops/reiniciar.sh` en el servidor — el worker necesita cargar el código nuevo
 
 > El campo `function` debe coincidir exactamente con el `name` del decorador `@celery_app.task`.
 > La API controla **cuándo** (schedule/kwargs). El **cómo** (código Python) debe existir primero.
@@ -106,14 +128,14 @@ python3 -c "import secrets; print(secrets.token_hex(64))"
 .venv/bin/pip install -r requirements.txt
 
 # 3. Crear tablas de auth y primer usuario admin
-python3 scripts/crear_usuarios.py --email admin@scheduler.local
+python3 ops/crear_usuarios.py --email admin@scheduler.local
 
 # 4. Crear usuarios adicionales (opcional)
-python3 scripts/crear_usuarios.py --email ops@empresa.com --rol operator
-python3 scripts/crear_usuarios.py --email auditor@empresa.com --rol viewer
+python3 ops/crear_usuarios.py --email ops@empresa.com --rol operator
+python3 ops/crear_usuarios.py --email auditor@empresa.com --rol viewer
 ```
 
-> `scripts/crear_usuarios.py` no está en el repositorio — transferirlo manualmente al servidor.
+> `ops/crear_usuarios.py` no está en el repositorio — transferirlo manualmente al servidor.
 
 ### Endpoints de auth
 
@@ -159,15 +181,19 @@ Ningún router requiere cambios.
 | Función | Descripción | kwargs principales |
 |---------|-------------|-------------------|
 | `tasks.siigo.sincronizar_siigo` | Sincroniza facturas, clientes, productos, etc. desde Siigo | `customer_id`, `procesos`, `destinatarios` |
-| `tasks.sincronizar_cliente_dominus.sincronizar_dominus` | Sincroniza datos desde Dominus/ESuite | `env_config` |
-| `tasks.envio_correo.enviar_correo` | Envía correo con resumen | `asunto`, `mensaje`, `destinatarios`, `plantilla` |
-| `tasks.monitor_estado_apis.verificar_apis` | Verifica el estado de las APIs externas | — |
-| `tasks.reenvio_dian.reenviar_facturas_dian` | Reenvía facturas pendientes a la DIAN (máx. 3 intentos) | `key_cli` (opcional) |
+| `tasks.dominus.sincronizar_dominus` | Sincroniza datos desde Dominus/ESuite | `env_config` |
+| `tasks.correo.enviar_correo` | Envía correo con resumen | `asunto`, `mensaje`, `destinatarios`, `plantilla` |
+| `tasks.monitor.verificar_apis` | Verifica el estado de las APIs externas | — |
+| `tasks.reenvio_dian.reenviar_facturas_dian` | Reenvía documentos pendientes a la DIAN (máx. 3 intentos) | `key_clis`, `tipos_doc` |
+| `tasks.reenvio_dian.enviar_reporte_dian_diario` | Correo consolidado del día | `destinatarios` |
+| `tasks.reenvio_dian.reportar_documentos_atascados` | Documentos que agotaron los intentos, por causa | `destinatarios`, `solo_si_hay` |
 
 ### Configurar reenvío DIAN
 
 ```bash
 # 1. Crear set de credenciales con los datos de conexión a la DB principal de esuite
+#    y de la API de emisión. Las siete primeras son OBLIGATORIAS: sin ellas el
+#    subprocess muere al importar su configuración.
 POST /credentials
 {
   "name": "esuite_dian",
@@ -177,6 +203,9 @@ POST /credentials
     "MAIN_DB_NAME": "...",
     "MAIN_DB_USER": "...",
     "MAIN_DB_PASSWORD": "...",
+    "API_PYTHON_URL": "https://...",
+    "API_PYTHON_USERNAME": "...",
+    "API_PYTHON_PASSWORD": "...",
     "PROVEEDOR_INTEGRACION": "AVIA",
     "MAX_INTENTOS": "3"
   }
@@ -204,8 +233,8 @@ POST /tasks
 }
 ```
 
-> Los archivos del servicio viven en `scripts/reenvio_service/`. Los imports de `app.*`
-> se resuelven en tiempo de ejecución desde `esuite_dian_app_v2/`.
+> Los archivos del servicio viven en `reenvio/` y se ejecutan como
+> `python -m reenvio.main` desde la raíz del proyecto. Ver `reenvio/README.md`.
 
 ## Campos de schedule
 
@@ -235,7 +264,7 @@ POST /credentials
 
 ## Plantillas de correo
 
-La tarea `tasks.envio_correo.enviar_correo` acepta el kwarg `plantilla`:
+La tarea `tasks.correo.enviar_correo` acepta el kwarg `plantilla`:
 
 | Valor | Comportamiento |
 |-------|----------------|
@@ -252,7 +281,7 @@ La tarea `tasks.envio_correo.enviar_correo` acepta el kwarg `plantilla`:
 sudo bash systemd/instalar.sh --path /ruta/del/proyecto --user nombre_usuario
 
 # Tras cambios en DB, código o .env
-sudo bash scripts/reiniciar.sh
+sudo bash ops/reiniciar.sh
 
 # Logs
 sudo journalctl -u celery-worker -f

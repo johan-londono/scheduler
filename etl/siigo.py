@@ -5,7 +5,7 @@ credenciales del cliente, y se llama run_sync() por rango/proceso. La config,
 el customer y las credenciales viven en la instancia; ninguna función interna
 las recibe como parámetro.
 
-    from scripts.sync_siigo import Config, SiigoSync
+    from etl.siigo import Config, SiigoSync
 
     sync = SiigoSync(
         customer=23,
@@ -20,7 +20,6 @@ las recibe como parámetro.
     )
 """
 
-import os
 import asyncio
 import json
 import logging
@@ -47,6 +46,11 @@ class Config:
     api_password: str
     workers: int = 10
     page_size: int = 100
+    # La API devuelve 500 intermitentes (transacción a medias del lado del
+    # servidor). En la página 1 son fatales: sin ella no se sabe cuántas
+    # páginas hay y el proceso entero se cae sin traer nada.
+    intentos: int = 3          # intentos totales por petición ante 5xx
+    espera_reintento: int = 2  # segundos; se multiplica por el nº de intento
 
 
 PROCESS = [
@@ -105,6 +109,41 @@ class SiigoSync:
 
     # ========== API ==========
 
+    async def _post(self, http_client: httpx.AsyncClient, url: str, etiqueta: str,
+                    **kwargs) -> Optional[httpx.Response]:
+        """POST con reintentos ante 5xx y errores de transporte.
+
+        Solo se reintenta lo que puede mejorar esperando: un 5xx o una conexión
+        caída. Los 4xx se devuelven tal cual — un 401 o un 404 no se arreglan
+        insistiendo.
+
+        Devuelve la última respuesta recibida (aunque sea 5xx) o None si nunca
+        hubo respuesta.
+        """
+        respuesta = None
+
+        for intento in range(1, self.config.intentos + 1):
+            try:
+                respuesta = await http_client.post(url, **kwargs)
+                if respuesta.status_code < 500:
+                    return respuesta
+                motivo = f"HTTP {respuesta.status_code}"
+            except httpx.TransportError as exc:
+                respuesta = None
+                motivo = f"{type(exc).__name__}: {exc}"
+
+            if intento < self.config.intentos:
+                espera = self.config.espera_reintento * intento
+                logger.warning(
+                    f"{etiqueta}: {motivo} — reintento {intento + 1}/{self.config.intentos} "
+                    f"en {espera}s"
+                )
+                await asyncio.sleep(espera)
+            else:
+                logger.error(f"{etiqueta}: {motivo} — agotados {self.config.intentos} intentos")
+
+        return respuesta
+
     async def _generate_api_token(self, http_client: httpx.AsyncClient) -> Optional[str]:
         """Genera token de autenticación (httpx async)."""
         try:
@@ -115,12 +154,16 @@ class SiigoSync:
             }
 
             # La barra final evita el 307 de FastAPI (/token -> /token/)
-            response = await http_client.post(
+            response = await self._post(
+                http_client,
                 f"{self.config.api_url}/token/",
+                "token API",
                 data=data,
-                headers={'Accept': 'application/json'}
+                headers={'Accept': 'application/json'},
             )
 
+            if response is None:
+                return None
             if response.status_code != 200:
                 logger.error(f"Error generando token: {response.status_code} - {response.text}")
                 return None
@@ -145,8 +188,10 @@ class SiigoSync:
         Bearer de la API, no lo que devuelve esta función.
         """
         try:
-            response = await http_client.post(
+            response = await self._post(
+                http_client,
                 f"{self.config.api_url}/v1/siigo/generate/token",
+                "sesión Siigo",
                 json={
                     'username': self.username,
                     'access_key': self.access_key,
@@ -154,9 +199,11 @@ class SiigoSync:
                 headers={
                     'Accept': 'application/json',
                     'Authorization': api_token,
-                }
+                },
             )
 
+            if response is None:
+                return None
             if response.status_code != 200:
                 logger.error(
                     f"Error generando token Siigo: {response.status_code} - {response.text[:500]}"
@@ -204,8 +251,12 @@ class SiigoSync:
                     'year': date_obj.year
                 }
 
-            response = await http_client.post(
+            logger.info(f"[{process}] Request: página {page}")
+
+            response = await self._post(
+                http_client,
                 f"{self.config.api_url}/v1/siigo/generate/{process}",
+                f"[{process}] página {page}",
                 params={
                     'page': page,
                     'pageSize': self.config.page_size,
@@ -215,11 +266,12 @@ class SiigoSync:
                 headers={
                     'Accept': 'application/json',
                     'Authorization': token
-                }
+                },
             )
 
-            logger.info(f"[{process}] Request: página {page}")
-
+            if response is None:
+                logger.error(f"[{process}] página {page}: sin respuesta de la API")
+                return None
             if response.status_code != 200:
                 logger.error(
                     f"[{process}] página {page}: HTTP {response.status_code} - {response.text[:500]}"
@@ -282,7 +334,9 @@ class SiigoSync:
 
         Devuelve el resultado de la página 1, o None si falló.
         """
-        clear = not unique
+        # Solo la primera página limpia. Reanudar desde page=5 con clear=True
+        # borraba las páginas 1-4 que ya estaban guardadas.
+        clear = not unique and page == 1
 
         result = await self._request_api(
             http_client, process, page, date_start, date_end, clear
@@ -308,35 +362,46 @@ class SiigoSync:
 
         return result
 
-    async def _process_queue(self, tasks_queue: asyncio.Queue) -> None:
-        """Procesa cola de tareas con N workers."""
+    async def _process_queue(self, tasks_queue: asyncio.Queue) -> dict[str, int]:
+        """Procesa la cola con N workers y cuenta las páginas fallidas por proceso.
+
+        El conteo importa: si solo se mira la página 1, un proceso cuyas 200
+        páginas restantes fallaron se reporta como sincronización correcta.
+        """
+        fallos: dict[str, int] = {}
 
         async def worker(worker_id: int):
             async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http_client:
                 while True:
-                    try:
-                        task = await asyncio.wait_for(tasks_queue.get(), timeout=1.0)
-                    except asyncio.TimeoutError:
+                    task = await tasks_queue.get()
+                    if task is None:          # centinela de fin
+                        tasks_queue.task_done()
                         break
 
+                    proceso = task[0]
                     try:
-                        await self._request_api(http_client, *task)
+                        if await self._request_api(http_client, *task) is None:
+                            fallos[proceso] = fallos.get(proceso, 0) + 1
                     except Exception as e:
+                        fallos[proceso] = fallos.get(proceso, 0) + 1
                         logger.error(f"Worker {worker_id} error: {e}", exc_info=True)
                     finally:
                         tasks_queue.task_done()
 
-        workers = [
-            asyncio.create_task(worker(i))
-            for i in range(self.config.workers)
-        ]
+        # Un centinela por worker en vez de esperar 1s a que la cola se vacíe:
+        # wait_for(queue.get()) puede descartar el ítem que acaba de recibir si
+        # el timeout gana la carrera.
+        for _ in range(self.config.workers):
+            tasks_queue.put_nowait(None)
 
-        await tasks_queue.join()
+        await asyncio.gather(*[
+            asyncio.create_task(worker(i)) for i in range(self.config.workers)
+        ])
 
-        for w in workers:
-            w.cancel()
-
+        if fallos:
+            logger.error(f"Páginas fallidas por proceso: {fallos}")
         logger.info("Todas las tareas procesadas")
+        return fallos
 
     async def run_sync(
         self,
@@ -390,9 +455,17 @@ class SiigoSync:
         queued = tasks_queue.qsize()
 
         if queued:
-            await self._process_queue(tasks_queue)
+            paginas_fallidas = await self._process_queue(tasks_queue)
         else:
+            paginas_fallidas = {}
             logger.info("No hay páginas adicionales que procesar")
+
+        # Un proceso cuya página 1 respondió pero cuyas páginas restantes
+        # fallaron NO está sincronizado: pasa a fallidos.
+        for proc in list(ok):
+            if paginas_fallidas.get(proc):
+                ok.remove(proc)
+                failed.append(proc)
 
         elapsed = time.time() - start_time
         logger.info(f"Sincronización terminada en {elapsed:.2f}s (ok={len(ok)} fallidos={len(failed)})")
@@ -403,5 +476,7 @@ class SiigoSync:
             'ok': ok,
             'failed': failed,
             'queued': queued,
+            'paginas_ok': queued - sum(paginas_fallidas.values()),
+            'paginas_fallidas': paginas_fallidas,
             'elapsed': elapsed,
         }

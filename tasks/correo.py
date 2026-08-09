@@ -1,12 +1,10 @@
+import html
 import os
 import logging
 import smtplib
-from datetime import datetime
 from email.message import EmailMessage
 
-import redis
-
-from app import celery_app
+from app import celery_app, ahora as reloj
 
 logger = logging.getLogger(__name__)
 
@@ -14,28 +12,32 @@ _TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__
 
 
 def _cargar_plantilla(nombre, asunto, mensaje, ahora):
-    """Carga templates/nombre.html e interpola {asunto}, {mensaje}, {ahora}."""
+    """Carga templates/nombre.html e interpola {asunto}, {mensaje}, {ahora}.
+
+    Sustitución literal en vez de str.format: una plantilla con CSS ({margin:0})
+    hacía reventar el envío entero con KeyError.
+    """
     ruta = os.path.join(_TEMPLATES_DIR, f"{nombre}.html")
     if not os.path.isfile(ruta):
         raise FileNotFoundError(f"Plantilla no encontrada: {ruta}")
+
     with open(ruta, "r", encoding="utf-8") as f:
-        return f.read().format(asunto=asunto, mensaje=mensaje, ahora=ahora)
+        contenido = f.read()
 
-
-def _obtener_numero_correo():
-    """Obtiene un consecutivo para correos de prueba usando Redis."""
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    try:
-        cliente = redis.Redis.from_url(redis_url)
-        return cliente.incr("scheduler:correo_prueba:contador")
-    except Exception as error:
-        logger.warning(f"No se pudo obtener contador en Redis: {error}")
-        return int(datetime.now().timestamp())
+    for marca, valor in (("{asunto}", asunto), ("{mensaje}", mensaje), ("{ahora}", ahora)):
+        contenido = contenido.replace(marca, html.escape(str(valor)))
+    return contenido
 
 
 def _construir_html(asunto, mensaje, datos_reporte, ahora):
-    """Construye el contenido HTML del correo."""
+    """Construye el contenido HTML del correo.
+
+    Todo lo que viene de fuera (mensajes de error de la DIAN, respuestas de
+    API) se escapa: traen XML y comillas que rompían la tabla del correo.
+    """
     filas_html = ""
+    asunto = html.escape(str(asunto))
+    mensaje = html.escape(str(mensaje))
 
     if datos_reporte and datos_reporte.get("resultados"):
         for r in datos_reporte["resultados"]:
@@ -43,11 +45,13 @@ def _construir_html(asunto, mensaje, datos_reporte, ahora):
             color = "#16a34a" if es_ok else "#dc2626"
             icono = "&#10003;" if es_ok else "&#10007;"
             badge_bg = "#dcfce7" if es_ok else "#fee2e2"
-            detalle = f'<br><span style="color:#6b7280;font-size:12px">{r["detalle"]}</span>' if r["detalle"] else ""
+            proceso = html.escape(str(r["proceso"]))
+            detalle_txt = html.escape(str(r["detalle"])) if r.get("detalle") else ""
+            detalle = f'<br><span style="color:#6b7280;font-size:12px">{detalle_txt}</span>' if detalle_txt else ""
 
             filas_html += f"""
             <tr>
-                <td style="padding:12px 16px;border-bottom:1px solid #f3f4f6;font-size:14px;color:#374151">{r["proceso"]}</td>
+                <td style="padding:12px 16px;border-bottom:1px solid #f3f4f6;font-size:14px;color:#374151">{proceso}</td>
                 <td style="padding:12px 16px;border-bottom:1px solid #f3f4f6;text-align:center">
                     <span style="display:inline-block;padding:4px 12px;border-radius:12px;font-size:13px;font-weight:600;color:{color};background:{badge_bg}">{icono} {r["estado"]}</span>
                     {detalle}
@@ -59,13 +63,13 @@ def _construir_html(asunto, mensaje, datos_reporte, ahora):
             filas_resumen += f"""
             <tr>
                 <td style="color:#6b7280;font-size:13px">Customer ID</td>
-                <td style="text-align:right;font-weight:600;font-size:13px;color:#111827">{datos_reporte['customer_id']}</td>
+                <td style="text-align:right;font-weight:600;font-size:13px;color:#111827">{html.escape(str(datos_reporte['customer_id']))}</td>
             </tr>"""
         if datos_reporte.get('fecha_inicio') and datos_reporte.get('fecha_fin'):
             filas_resumen += f"""
             <tr>
                 <td style="color:#6b7280;font-size:13px">Periodo</td>
-                <td style="text-align:right;font-weight:600;font-size:13px;color:#111827">{datos_reporte['fecha_inicio']} &rarr; {datos_reporte['fecha_fin']}</td>
+                <td style="text-align:right;font-weight:600;font-size:13px;color:#111827">{html.escape(str(datos_reporte['fecha_inicio']))} &rarr; {html.escape(str(datos_reporte['fecha_fin']))}</td>
             </tr>"""
         resumen_info = f'<table style="width:100%;margin-bottom:8px">{filas_resumen}</table>' if filas_resumen else ""
 
@@ -155,10 +159,20 @@ def _construir_html(asunto, mensaje, datos_reporte, ahora):
 </html>"""
 
 
-@celery_app.task(name="tasks.correo.enviar_correo")
+@celery_app.task(
+    name="tasks.correo.enviar_correo",
+    autoretry_for=(smtplib.SMTPException, OSError),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 3},
+)
 def enviar_correo(asunto="Correo programado", mensaje="Mensaje automático del scheduler", destinatarios=None, datos_reporte=None, plantilla=None):
-    """Envía un correo HTML usando configuración MAIL_* o SMTP_* por variables de entorno."""
-    ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Envía un correo HTML usando configuración MAIL_* o SMTP_* por variables de entorno.
+
+    Los fallos levantan excepción en vez de devolver un string: si esta tarea
+    termina en SUCCESS sin haber enviado nada, el reporte se pierde y nadie se
+    entera. Los cortes transitorios de SMTP se reintentan solos.
+    """
+    ahora = reloj().strftime("%Y-%m-%d %H:%M:%S")
     mailer = (os.environ.get("MAIL_MAILER") or "smtp").lower()
     smtp_host = os.environ.get("SMTP_HOST") or os.environ.get("MAIL_HOST")
     smtp_port = int(os.environ.get("SMTP_PORT") or os.environ.get("MAIL_PORT", "587"))
@@ -166,22 +180,26 @@ def enviar_correo(asunto="Correo programado", mensaje="Mensaje automático del s
     smtp_password = os.environ.get("SMTP_PASSWORD") or os.environ.get("MAIL_PASSWORD")
     remitente = os.environ.get("SMTP_FROM") or os.environ.get("MAIL_FROM_ADDRESS") or smtp_user
     encryption = (os.environ.get("MAIL_ENCRYPTION") or "tls").lower()
-    usar_tls = os.environ.get("SMTP_USE_TLS", "true").lower() == "true" and encryption in ("tls", "starttls", "")
+    usar_ssl = encryption == "ssl"
+    usar_tls = (
+        not usar_ssl
+        and os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
+        and encryption in ("tls", "starttls", "")
+    )
 
     if mailer != "smtp":
-        logger.error(f"[{ahora}] MAIL_MAILER={mailer} no es soportado. Usa smtp.")
-        return "Error: MAIL_MAILER no soportado"
+        raise ValueError(f"MAIL_MAILER={mailer} no es soportado. Usa smtp.")
 
     if destinatarios is None:
         destino_env = os.environ.get("SMTP_TO") or os.environ.get("MAIL_TO", "")
         destinatarios = [correo.strip() for correo in destino_env.split(",") if correo.strip()]
 
     if not smtp_host or not smtp_user or not smtp_password or not remitente or not destinatarios:
-        logger.error(
-            "[%s] No se pudo enviar correo: falta configuración (MAIL_HOST/SMTP_HOST, MAIL_USERNAME/SMTP_USER, MAIL_PASSWORD/SMTP_PASSWORD, MAIL_FROM_ADDRESS/SMTP_FROM, MAIL_TO/SMTP_TO).",
-            ahora,
+        raise ValueError(
+            "Falta configuración de correo: revisa MAIL_HOST/SMTP_HOST, "
+            "MAIL_USERNAME/SMTP_USER, MAIL_PASSWORD/SMTP_PASSWORD, "
+            "MAIL_FROM_ADDRESS/SMTP_FROM y MAIL_TO/SMTP_TO."
         )
-        return "Error: configuración de correo incompleta"
 
     email = EmailMessage()
     email["Subject"] = asunto
@@ -200,13 +218,17 @@ def enviar_correo(asunto="Correo programado", mensaje="Mensaje automático del s
         email.add_alternative(html, subtype="html")
     else:
         try:
-            html = _cargar_plantilla(plantilla, asunto, mensaje, ahora)
-            email.add_alternative(html, subtype="html")
-        except FileNotFoundError as e:
-            logger.error(f"[{ahora}] {e}. Se enviará solo texto plano.")
+            cuerpo = _cargar_plantilla(plantilla, asunto, mensaje, ahora)
+            email.add_alternative(cuerpo, subtype="html")
+        except OSError as e:
+            # Plantilla ausente o ilegible: el correo sale en texto plano, pero sale.
+            logger.error(f"[{ahora}] Plantilla '{plantilla}' inservible ({e}). Se enviará solo texto plano.")
 
     logger.info(f"[{ahora}] Enviando correo a {', '.join(destinatarios)}...")
-    with smtplib.SMTP(smtp_host, smtp_port) as servidor:
+    conectar = smtplib.SMTP_SSL if usar_ssl else smtplib.SMTP
+    # timeout obligatorio: sin él, un SMTP que acepta y no responde deja el
+    # worker colgado ocupando un slot de concurrencia para siempre.
+    with conectar(smtp_host, smtp_port, timeout=30) as servidor:
         if usar_tls:
             servidor.starttls()
         servidor.login(smtp_user, smtp_password)

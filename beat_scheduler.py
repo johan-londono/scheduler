@@ -27,6 +27,8 @@ class SchedulerDB(PersistentScheduler):
 
     def setup_schedule(self):
         super().setup_schedule()
+        # app.py ya no lee la DB al importarse: la primera carga se hace aquí.
+        self.merge_inplace(construir_schedule())
         self._ultima_recarga = time.monotonic()
 
     def tick(self, *args, **kwargs):

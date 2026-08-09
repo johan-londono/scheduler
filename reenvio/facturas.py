@@ -7,26 +7,39 @@ Reglas:
   dentro del endpoint getCufe antes del envío, por lo que el filtro usa < MAX_INTENTOS).
 - Si transmitir=False, las facturas se marcan como omitidas y no se loguean errores.
 - Un lock por key_cli previene ejecuciones concurrentes del mismo cliente.
+
+Las piezas compartidas con NC y documentos de soporte viven en comun.py.
 """
 import asyncio
 import asyncpg
 import httpx
-import json
-import base64
 import sys
 import traceback
-from datetime import datetime
 
-from reenvio_service.config import MAX_INTENTOS, API_PYTHON_URL, filtro_fecha_sql
-from reenvio_service.error_log import insert_error
+from reenvio.comun import (
+    clasificar,
+    cufe,
+    detalle_fallo,
+    documento_atascado,
+    error_mensaje,
+    llamar_api,
+    registrar_error,
+    resumen,
+)
+from reenvio.config import MAX_INTENTOS, API_PYTHON_URL, filtro_fecha_sql
+from reenvio.errores import ensure_error_table, insert_error, ultimos_errores
 
 # Locks por cliente para evitar doble-incremento de diannumeroenvios
 # si el servicio se invoca concurrentemente
 _client_locks: dict[str, asyncio.Lock] = {}
 
+# current_schema() evita elegir la variante equivocada de la consulta si el
+# cliente tiene otra tabla 'facturas' en un esquema secundario.
 _CHECK_PREFIJO_COL = """
     SELECT column_name FROM information_schema.columns
-    WHERE  table_name = 'facturas' AND column_name = 'prefijo'
+    WHERE  table_name = 'facturas'
+      AND  column_name = 'prefijo'
+      AND  table_schema = current_schema()
 """
 
 _FILTRO_FECHA = filtro_fecha_sql("f.created_at")
@@ -60,6 +73,23 @@ _QUERY_PENDIENTES_JOIN = f"""
     ORDER  BY f.created_at ASC
 """
 
+# Facturas que ya gastaron todos los intentos: el filtro de pendientes las
+# excluye, así que sin esta consulta desaparecen del reporte para siempre.
+# Devuelve los documentos, no un conteo: "hay 12 atascadas" no sirve para
+# arreglarlas, "estas 12 y por esto" sí.
+_QUERY_AGOTADAS = f"""
+    SELECT f.id,
+           f.consecutivo,
+           COALESCE(f.diannumeroenvios, 0) AS intentos
+    FROM   facturas f
+    WHERE  f.modalidadpago_id = 2
+      AND  f.diancufe IS NULL
+      AND  f.estado_id = 1
+      AND  COALESCE(f.diannumeroenvios, 0) >= $1
+      {_FILTRO_FECHA}
+    ORDER  BY f.created_at ASC
+"""
+
 
 async def obtener_token(username: str, password: str) -> str:
     """Autentica contra la API y retorna el Bearer token JWT."""
@@ -78,41 +108,25 @@ async def obtener_token(username: str, password: str) -> str:
 
 async def llamar_getcufe(token: str, key_cli: str, consecutivo: str, prefijo: str) -> dict:
     """Llama a GET /api/v1/invoice/getcufe/{data_b64} y retorna el resultado."""
-    payload = json.dumps({
+    return await llamar_api("invoice/getcufe", token, {
         "key_cli": key_cli,
         "consecutivo_factura": int(consecutivo),
         "prefijo_factura": str(prefijo),
     })
-    data_b64 = base64.urlsafe_b64encode(payload.encode()).decode()
 
-    url = f"{API_PYTHON_URL}/api/v1/invoice/getcufe/{data_b64}"
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
+
+async def _fichas_atascadas(conn, key_cli: str, nombre: str, filas) -> list:
+    """Cruza las facturas sin intentos restantes con su último error registrado."""
+    errores = await ultimos_errores(conn, "facturas", [f["id"] for f in filas])
+    return [
+        documento_atascado(
+            key_cli, nombre,
+            f"FE {f['consecutivo']}",
+            f["intentos"],
+            errores.get(f["id"]),
         )
-        if not resp.is_success:
-            try:
-                body = resp.json()
-                inner = body.get("detail", {})
-                if isinstance(inner, dict):
-                    return {
-                        "succeeded":  False,
-                        "reasonCode": inner.get("reasonCode", resp.status_code),
-                        "reason":     inner.get("reason", ""),
-                        "message":    inner.get("message", ""),
-                        "detail":     inner.get("detail", []),
-                    }
-            except Exception:
-                pass
-            return {
-                "succeeded":  False,
-                "reasonCode": f"HTTP_{resp.status_code}",
-                "reason":     f"Error HTTP {resp.status_code}",
-                "message":    resp.text[:500],
-                "detail":     [],
-            }
-        return resp.json()
+        for f in filas
+    ]
 
 
 async def reenviar_cliente(cliente: dict, token: str, central_pool: asyncpg.Pool) -> dict:
@@ -149,11 +163,17 @@ async def _procesar_cliente(cliente: dict, token: str, central_pool: asyncpg.Poo
             col = await conn.fetchrow(_CHECK_PREFIJO_COL)
             query = _QUERY_PENDIENTES_DIRECTO if col else _QUERY_PENDIENTES_JOIN
             facturas = await conn.fetch(query, MAX_INTENTOS)
+            atascadas = await conn.fetch(_QUERY_AGOTADAS, MAX_INTENTOS)
+
+        async with central_pool.acquire() as conn:
+            await ensure_error_table(conn)
+            agotadas_detalle = await _fichas_atascadas(conn, key_cli, nombre, atascadas)
 
         if not facturas:
-            return _summary(key_cli, nombre, total=0)
+            return resumen(key_cli, nombre, total=0, agotadas=len(atascadas),
+                           agotadas_detalle=agotadas_detalle)
 
-        exitosas = fallidas = omitidas = 0
+        exitosas = fallidas = omitidas = ya_emitidas = 0
         fallidas_detalle: list[dict] = []
 
         for factura in facturas:
@@ -175,107 +195,63 @@ async def _procesar_cliente(cliente: dict, token: str, central_pool: asyncpg.Poo
                     'detail':     '',
                 }
 
-            succeeded   = result.get('succeeded', False)
+            estado      = clasificar(result)
             reason_code = result.get('reasonCode', '')
 
-            if succeeded:
+            if estado == 'exito':
                 exitosas += 1
-                print(f"[OK] cufe={result.get('cufe', '')[:20]}...")
+                print(f"[OK] cufe={cufe(result)}...")
 
-            elif reason_code == 'TRANSMISSION_DISABLED':
-                remaining  = len(facturas) - (exitosas + fallidas + omitidas)
-                omitidas  += remaining
-                print(f"[OMITIDA] transmitir=False")
+            elif estado == 'ya_emitido':
+                ya_emitidas += 1
+                print("[YA EMITIDO] la DIAN ya tenía el documento aceptado")
+
+            elif estado == 'omitido':
+                omitidas += len(facturas) - (exitosas + fallidas + omitidas + ya_emitidas)
+                print("[OMITIDA] transmitir=False")
                 break
 
             else:
                 fallidas += 1
-                razon   = str(result.get('reason',   '') or '')
-                mensaje = str(result.get('message',  '') or '')
-                raw_det = result.get('detail', '')
-                # detail puede ser lista, dict o string según la API
-                if isinstance(raw_det, list):
-                    detalle_items = [str(d) for d in raw_det]
-                elif isinstance(raw_det, dict):
-                    detalle_items = [f"{k}: {v}" for k, v in raw_det.items()]
-                elif raw_det:
-                    detalle_items = [str(raw_det)]
-                else:
-                    detalle_items = []
-
+                razon   = str(result.get('reason',  '') or '')
+                mensaje = str(result.get('message', '') or '')
                 print(f"[FAIL] {reason_code}: {razon} — {mensaje}")
 
-                fallidas_detalle.append({
-                    'key_cli':  key_cli,
-                    'cliente':  nombre,
-                    'factura':  f"{prefijo}-{consecutivo}",
-                    'codigo':   str(reason_code) if reason_code else '',
-                    'razon':    razon,
-                    'mensaje':  mensaje,
-                    'detalle':  detalle_items,
-                })
+                fallidas_detalle.append(
+                    detalle_fallo(key_cli, nombre, f"{prefijo}-{consecutivo}", result)
+                )
 
-                async with central_pool.acquire() as conn:
-                    await insert_error(
-                        conn,
-                        factura_id=factura_id,
-                        prefijo=prefijo,
-                        consecutivo=consecutivo,
-                        intento_numero=intento,
-                        error_codigo=str(reason_code) if reason_code is not None else None,
-                        error_razon=str(result.get('reason', '')),
-                        error_mensaje=json.dumps(
-                            {
-                                'message': str(result.get('message', '')),
-                                'detail':  str(result.get('detail', '')),
-                            },
-                            ensure_ascii=False,
-                        ),
-                        cliente_key=key_cli,
-                    )
+                await registrar_error(
+                    central_pool, insert_error,
+                    factura_id=factura_id,
+                    prefijo=prefijo,
+                    consecutivo=consecutivo,
+                    intento_numero=intento,
+                    error_codigo=str(reason_code) if reason_code is not None else None,
+                    error_razon=razon,
+                    error_mensaje=error_mensaje(result),
+                    cliente_key=key_cli,
+                )
 
-        return _summary(key_cli, nombre,
-                        total=len(facturas),
-                        exitosas=exitosas,
-                        fallidas=fallidas,
-                        omitidas=omitidas,
-                        fallidas_detalle=fallidas_detalle)
+        return resumen(key_cli, nombre,
+                       total=len(facturas),
+                       exitosas=exitosas,
+                       fallidas=fallidas,
+                       omitidas=omitidas,
+                       ya_emitidas=ya_emitidas,
+                       agotadas=len(atascadas),
+                       fallidas_detalle=fallidas_detalle,
+                       agotadas_detalle=agotadas_detalle)
 
     except (asyncpg.PostgresError, OSError) as exc:
         print(f"[ERROR] Conexión DB — {nombre} ({key_cli}): {exc}", file=sys.stderr)
-        return _summary(key_cli, nombre, total=0, connection_error=str(exc))
+        return resumen(key_cli, nombre, total=0, connection_error=str(exc))
 
     except Exception as exc:
         print(f"[ERROR] Excepción inesperada en facturas — {nombre} ({key_cli}):", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        return _summary(key_cli, nombre, total=0, connection_error=f"excepcion: {exc}")
+        return resumen(key_cli, nombre, total=0, connection_error=f"excepcion: {exc}")
 
     finally:
         if pool:
             await pool.close()
-
-
-def _summary(
-    key_cli: str,
-    nombre: str,
-    *,
-    total: int = 0,
-    exitosas: int = 0,
-    fallidas: int = 0,
-    omitidas: int = 0,
-    fallidas_detalle: list = None,
-    connection_error: str = None,
-) -> dict:
-    s = {
-        'key_cli':  key_cli,
-        'nombre':   nombre,
-        'total':    total,
-        'exitosas': exitosas,
-        'fallidas': fallidas,
-        'omitidas': omitidas,
-    }
-    if fallidas_detalle:
-        s['fallidas_detalle'] = fallidas_detalle
-    if connection_error:
-        s['connection_error'] = connection_error
-    return s

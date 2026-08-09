@@ -2,7 +2,7 @@
 Conexión a la DB principal de esuite para obtener los clientes registrados.
 """
 import asyncpg
-from reenvio_service.config import (
+from reenvio.config import (
     MAIN_DB_HOST, MAIN_DB_NAME, MAIN_DB_USER,
     MAIN_DB_PASSWORD, MAIN_DB_PORT,
     SCHEDULER_DB_HOST, SCHEDULER_DB_NAME, SCHEDULER_DB_USER,
