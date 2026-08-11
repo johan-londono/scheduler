@@ -8,11 +8,15 @@ from dotenv import load_dotenv
 from celery import Celery
 from celery.schedules import crontab
 
-# Asegurar que el directorio del proyecto esté en sys.path
+# Asegurar que el directorio del proyecto esté en sys.path.
+#
+# Sin condición a propósito: Celery importa este módulo dentro de cwd_in_path(),
+# que mete el cwd en sys.path y lo QUITA al salir. Con un `if not in sys.path`
+# el insert se saltaba (ya estaba, temporalmente) y al terminar no quedaba nada,
+# así que módulos de la raíz como beat_scheduler dejaban de ser importables.
 _project_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_project_dir, ".env"))
-if _project_dir not in sys.path:
-    sys.path.insert(0, _project_dir)
+sys.path.insert(0, _project_dir)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
