@@ -30,6 +30,12 @@ celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
+    # El scheduler que lee scheduler_tasks va aquí, no solo en el --scheduler
+    # del .service: un unit instalado antes de que existiera SchedulerDB
+    # arrancaría con el scheduler por defecto y un beat_schedule vacío, sin
+    # encolar nada y sin quejarse. Con esto, `celery -A app beat` a secas
+    # también hace lo correcto.
+    beat_scheduler="beat_scheduler:SchedulerDB",
 )
 
 
